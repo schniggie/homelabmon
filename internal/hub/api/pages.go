@@ -1020,6 +1020,37 @@ func (u *UIServer) handleOUICheck(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleDeletePeer removes a mesh peer. The {id} path value may be the
+// peer ID or its address; real peers re-add themselves with their next
+// heartbeat, so this is safe for cleaning stale or bogus entries.
+func (u *UIServer) handleDeletePeer(w http.ResponseWriter, r *http.Request) {
+	ref := r.PathValue("id")
+
+	peers, err := u.store.ListPeers(r.Context())
+	if err != nil {
+		writeJSONResp(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	var id string
+	for _, p := range peers {
+		if p.ID == ref || p.Address == ref {
+			id = p.ID
+			break
+		}
+	}
+	if id == "" {
+		writeJSONResp(w, http.StatusNotFound, map[string]string{"error": "peer not found"})
+		return
+	}
+
+	if err := u.store.DeletePeer(r.Context(), id); err != nil {
+		writeJSONResp(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	log.Info().Str("peer_id", id).Msg("peer removed")
+	writeJSONResp(w, http.StatusOK, map[string]string{"status": "ok", "deleted": id})
+}
+
 // handleDockerControl proxies a docker start/stop/restart to the correct agent node.
 func (u *UIServer) handleDockerControl(w http.ResponseWriter, r *http.Request) {
 	var req struct {

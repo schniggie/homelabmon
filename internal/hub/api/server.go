@@ -156,6 +156,9 @@ func (u *UIServer) SetupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/v1/hosts/{id}", u.handleDeleteHost)
 	mux.HandleFunc("POST /api/v1/oui-check", u.handleOUICheck)
 
+	// Peer management (auth-protected)
+	mux.HandleFunc("DELETE /api/v1/peers/{id}", u.handleDeletePeer)
+
 	// Docker control (proxied to agent)
 	mux.HandleFunc("POST /ui/docker/control", u.handleDockerControl)
 

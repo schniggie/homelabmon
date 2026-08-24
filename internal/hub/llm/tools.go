@@ -227,6 +227,14 @@ func ToolDefinitions() []Tool {
 		{
 			Type: "function",
 			Function: ToolFunction{
+				Name:        "remove_peer",
+				Description: "Remove a mesh peer entry (by address or ID). Use for stale or bogus peers; live peers re-add themselves on their next heartbeat, so this is safe cleanup, not destructive.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"address":{"type":"string","description":"Peer address (host:port) or peer ID to remove"}},"required":["address"]}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: ToolFunction{
 				Name:        "run_command",
 				Description: "Run a shell command on any agent node in the mesh (Linux, Windows, macOS, FreeBSD/OPNsense) and get stdout, stderr, and the exit code. Linux/macOS/BSD run /bin/sh; Windows runs cmd.exe (shell=\"powershell\" for PowerShell). Requires explicit user confirmation for EVERY command: show the exact command and target host first. Use for devops tasks: package upgrades, service checks, logs, config inspection.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"The shell command to run"},"hostname":{"type":"string","description":"Target host (optional, defaults to the local node). For fleet-wide tasks, call this once per host."},"shell":{"type":"string","description":"Windows only: cmd (default) or powershell","enum":["cmd","powershell"]},"timeout_seconds":{"type":"integer","description":"Timeout in seconds (default 120, max 600; use higher for upgrades)"},"confirm":{"type":"boolean","description":"Must be true, and only after the user explicitly approved the exact command"}},"required":["command","confirm"]}`),
@@ -312,6 +320,8 @@ func (e *ToolExecutor) execute(ctx context.Context, name string, args json.RawMe
 		return e.checkVendors(ctx)
 	case "add_peer":
 		return e.addPeer(ctx, args)
+	case "remove_peer":
+		return e.removePeer(ctx, args)
 	case "run_command":
 		return e.runCommand(ctx, args)
 	case "list_exec_history":
@@ -1235,6 +1245,43 @@ func (e *ToolExecutor) addPeer(ctx context.Context, args json.RawMessage) (strin
 	})), nil
 }
 
+func (e *ToolExecutor) removePeer(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Address string `json:"address"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", err
+	}
+	ref := strings.TrimSpace(params.Address)
+	if ref == "" {
+		return `{"error":"address (host:port or peer ID) is required"}`, nil
+	}
+
+	peers, err := e.store.ListPeers(ctx)
+	if err != nil {
+		return "", err
+	}
+	var found *models.PeerInfo
+	for i := range peers {
+		if peers[i].ID == ref || peers[i].Address == ref {
+			found = &peers[i]
+			break
+		}
+	}
+	if found == nil {
+		return fmt.Sprintf(`{"error":"no peer matching %q"}`, ref), nil
+	}
+	if err := e.store.DeletePeer(ctx, found.ID); err != nil {
+		return fmt.Sprintf(`{"error":"%s"}`, err.Error()), nil
+	}
+	return string(mustJSON(map[string]interface{}{
+		"ok":      true,
+		"removed": found.ID,
+		"address": found.Address,
+		"note":    "peer entry removed; a live peer re-adds itself with its next heartbeat",
+	})), nil
+}
+
 // runCommand executes a shell command on a mesh node. Every command requires
 // explicit confirmation; results are recorded in the exec history.
 func (e *ToolExecutor) runCommand(ctx context.Context, args json.RawMessage) (string, error) {
@@ -1366,7 +1413,7 @@ var managementTools = map[string]bool{
 	"docker_control": true, "trigger_network_scan": true, "send_notification": true,
 	"update_settings": true, "rename_host": true, "set_device_type": true,
 	"delete_host": true, "manage_integration": true, "check_vendors": true,
-	"add_peer": true, "run_command": true,
+	"add_peer": true, "run_command": true, "remove_peer": true,
 }
 
 func isManagementTool(name string) bool { return managementTools[name] }
@@ -1426,6 +1473,8 @@ func (e *ToolExecutor) recordActionMemory(ctx context.Context, name string, args
 		title = fmt.Sprintf("Integration %s: %s", p.Action, p.Name)
 	case "add_peer":
 		title = fmt.Sprintf("Added mesh peer %s", p.Address)
+	case "remove_peer":
+		title = fmt.Sprintf("Removed mesh peer %s", p.Address)
 	case "send_notification":
 		title = fmt.Sprintf("Sent notification: %s", p.Title)
 	case "update_settings":
