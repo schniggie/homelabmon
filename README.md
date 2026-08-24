@@ -19,6 +19,8 @@ A single-binary, zero-dependency homelab discovery and monitoring system with me
 - **Integrations** -- FRITZ!Box, Unifi, Home Assistant, Pi-hole, pfSense API pulls
 - **LLM chat** -- local Ollama integration: "What's running on my NAS?"
 - **AI agent** -- the chat can also *manage* the homelab: start/stop/restart Docker containers on any node, run shell commands on Linux/Windows/macOS/FreeBSD nodes, trigger scans, send notifications, change settings, rename/remove devices, test/sync integrations, and add mesh peers (with confirmation gates on every action)
+- **Agent memory** -- every management action is recorded per node; the agent recalls past actions and notes when working on a node again, and can store its own notes for future sessions
+- **Chat history** -- conversations are persisted with LLM-generated titles and can be resumed from the sidebar's History panel
 - **Remote commands** -- run devops commands on any node (package upgrades, service checks, logs) over the mesh; opt-in per node with `--exec`, full audit trail
 - **Lightweight CMDB** -- all devices in one SQLite database
 - **Notifications** -- ntfy.sh + webhook alerts for host offline / resource thresholds

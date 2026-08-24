@@ -158,6 +158,8 @@ Management tools:
 ```
 run_command(command, hostname?, shell?, timeout_seconds?, confirm) -> run on any agent node: Linux/macOS/BSD via sh, Windows via cmd/powershell; audit-trailed
 list_exec_history(hostname?, limit?)                       -> recent command executions
+recall_memory(hostname?, kind?, limit?)                    -> past actions and notes for a node (or global), newest first
+remember(title, detail?, hostname?)                        -> store a note for future sessions
 docker_control(container, hostname?, action, confirm?)     -> start/stop/restart containers on any node
 trigger_network_scan()                                     -> run ARP+mDNS scan now, returns device count
 send_notification(title, message, severity?)               -> push via ntfy/webhook
@@ -182,6 +184,26 @@ carry a `confirm` parameter. The system prompt instructs the model to ask the us
 first and only pass `confirm=true` after explicit agreement; the executor enforces
 the gate independently of the model. Executed actions are shown as badges in the
 chat UI and logged.
+
+## Agent Memory (Phase 9)
+
+Two layers of persistence so the agent improves with use:
+
+**Node memory** (`memories` table): every successful management tool call
+(docker_control, run_command, update_settings, ...) is automatically recorded
+with a per-tool summary title, scoped to the affected node (`node:<id>`) or
+global. The agent can also store free-form notes (`remember`) -- fixes applied
+and why, config locations, known issues, user preferences -- and recalls
+everything with `recall_memory` when working on that node again. Recording
+never fails the action it describes.
+
+**Chat sessions** (`chat_sessions`/`chat_messages`): conversations persist
+across restarts. Each session gets an LLM-generated title (async, after the
+first exchange; falls back to a truncated user message). Messages carry the
+tool-action log so the UI replays what was executed. Endpoints:
+`GET /api/v1/llm/sessions`, `GET .../sessions/{id}/messages`,
+`DELETE .../sessions/{id}`. The sidebar's History panel lists, loads, and
+deletes sessions.
 
 Chat UI in the sidebar with suggestion buttons, session history, and an action
 trail. Tool-calling loop (max 32 rounds) handles multi-step and fleet-wide workflows automatically.

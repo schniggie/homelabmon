@@ -2,9 +2,13 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
+	"time"
 
+	"github.com/dx111ge/homelabmon/internal/store"
 	"github.com/rs/zerolog/log"
 )
 
@@ -25,6 +29,11 @@ Managing the homelab:
 - Test, sync, or remove external integrations like FRITZ!Box, Unifi, Home Assistant, Pi-hole, pfSense (manage_integration)
 - Connect new nodes to the mesh (add_peer)
 - Review what commands were already run (list_exec_history)
+
+Persistent memory:
+- Every management action you perform is recorded automatically per node.
+- When you start working on a node, call recall_memory for that host to see past actions, fixes, and notes from earlier sessions.
+- After completing significant work (a fix, an upgrade, a discovered quirk, a user preference), store a concise note with remember() so future sessions benefit. Record facts that are NOT derivable from the live data: what was changed and why, known issues, where configs live, user preferences.
 
 Safety rules -- follow them strictly:
 - run_command requires confirmation for EVERY command, no matter how harmless it looks. State the exact command and the target host, then wait for the user's approval. Only call with confirm=true after the user agreed to that exact command.
@@ -55,37 +64,46 @@ type Action struct {
 	Err    bool   `json:"error,omitempty"`
 }
 
-// ChatHandler manages conversations with the LLM.
+// ChatHandler manages conversations with the LLM. Sessions are persisted in
+// the store with LLM-generated titles, so history survives restarts.
 type ChatHandler struct {
 	client   *Client
 	executor *ToolExecutor
-	mu       sync.Mutex
-	sessions map[string][]Message // sessionID -> conversation history
+	store    *store.Store
+	mu       sync.Mutex // serializes chats; store access is single-conn anyway
 }
 
-func NewChatHandler(client *Client, executor *ToolExecutor) *ChatHandler {
+func NewChatHandler(client *Client, executor *ToolExecutor, s *store.Store) *ChatHandler {
 	return &ChatHandler{
 		client:   client,
 		executor: executor,
-		sessions: make(map[string][]Message),
+		store:    s,
 	}
 }
 
 // Chat sends a user message and returns the assistant's response plus a log
 // of the tool actions executed along the way. It handles the tool-calling
-// loop automatically.
+// loop automatically and persists the exchange.
 func (h *ChatHandler) Chat(ctx context.Context, sessionID, userMessage string) (string, []Action, error) {
 	var actions []Action
 
 	h.mu.Lock()
-	messages, ok := h.sessions[sessionID]
-	if !ok {
-		messages = []Message{
-			{Role: "system", Content: systemPrompt},
+	defer h.mu.Unlock()
+
+	// Load persisted history (system prompt + last turns)
+	messages := []Message{{Role: "system", Content: systemPrompt}}
+	persisted, err := h.store.GetChatMessages(ctx, sessionID, 2*20)
+	if err == nil {
+		for _, m := range persisted {
+			if m.Role == "user" || m.Role == "assistant" {
+				messages = append(messages, Message{Role: m.Role, Content: m.Content})
+			}
 		}
 	}
+	firstExchange := len(persisted) == 0
+
 	messages = append(messages, Message{Role: "user", Content: userMessage})
-	h.mu.Unlock()
+	h.store.AppendChatMessage(ctx, sessionID, "user", userMessage, "[]")
 
 	tools := ToolDefinitions()
 
@@ -99,9 +117,10 @@ func (h *ChatHandler) Chat(ctx context.Context, sessionID, userMessage string) (
 
 		// If no tool calls, we have our final answer
 		if len(resp.Message.ToolCalls) == 0 {
-			h.mu.Lock()
-			h.sessions[sessionID] = trimHistory(messages)
-			h.mu.Unlock()
+			h.persist(ctx, sessionID, resp.Message.Content, actions)
+			if firstExchange {
+				h.generateTitleAsync(sessionID, userMessage, resp.Message.Content)
+			}
 			return resp.Message.Content, actions, nil
 		}
 
@@ -136,20 +155,62 @@ func (h *ChatHandler) Chat(ctx context.Context, sessionID, userMessage string) (
 	if err != nil {
 		return "", actions, err
 	}
-	messages = append(messages, resp.Message)
-
-	h.mu.Lock()
-	h.sessions[sessionID] = trimHistory(messages)
-	h.mu.Unlock()
+	h.persist(ctx, sessionID, resp.Message.Content, actions)
+	if firstExchange {
+		h.generateTitleAsync(sessionID, userMessage, resp.Message.Content)
+	}
 
 	return resp.Message.Content, actions, nil
 }
 
-// ClearSession removes conversation history for a session.
+// persist stores the assistant reply with its action log.
+func (h *ChatHandler) persist(ctx context.Context, sessionID, content string, actions []Action) {
+	actionsJSON, _ := json.Marshal(actions)
+	if err := h.store.AppendChatMessage(ctx, sessionID, "assistant", content, string(actionsJSON)); err != nil {
+		log.Warn().Err(err).Msg("persist chat message")
+	}
+}
+
+// generateTitleAsync asks the LLM for a short session title after the first
+// exchange. Runs in the background so it never delays the chat response.
+func (h *ChatHandler) generateTitleAsync(sessionID, userMsg, assistantReply string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+
+		title := h.generateTitle(ctx, userMsg, assistantReply)
+		if title == "" {
+			title = truncate(strings.TrimSpace(userMsg), 60)
+		}
+		if err := h.store.SetSessionTitle(context.Background(), sessionID, title); err != nil {
+			log.Warn().Err(err).Msg("set session title")
+		}
+	}()
+}
+
+func (h *ChatHandler) generateTitle(ctx context.Context, userMsg, assistantReply string) string {
+	resp, err := h.client.Chat(ctx, []Message{
+		{Role: "system", Content: "Generate a very short title (3-6 words) for this conversation between a user and their homelab monitoring agent. Respond with ONLY the title, no quotes, no punctuation at the end."},
+		{Role: "user", Content: fmt.Sprintf("User: %s\n\nAgent reply (start): %s", truncate(userMsg, 300), truncate(assistantReply, 300))},
+	}, nil)
+	if err != nil {
+		return ""
+	}
+	title := strings.TrimSpace(resp.Message.Content)
+	// Take the first line only (models sometimes add explanations)
+	if i := strings.IndexByte(title, '\n'); i >= 0 {
+		title = title[:i]
+	}
+	title = strings.Trim(title, "\"'`* ")
+	if len(title) > 80 {
+		title = title[:80]
+	}
+	return title
+}
+
+// ClearSession removes a stored session and its messages.
 func (h *ChatHandler) ClearSession(sessionID string) {
-	h.mu.Lock()
-	delete(h.sessions, sessionID)
-	h.mu.Unlock()
+	h.store.DeleteChatSession(context.Background(), sessionID)
 }
 
 func truncate(s string, max int) string {
@@ -157,18 +218,4 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + "..."
-}
-
-// trimHistory keeps conversation at a reasonable size.
-// Keeps system prompt + last 20 messages.
-func trimHistory(messages []Message) []Message {
-	const maxMessages = 21 // system + 20
-	if len(messages) <= maxMessages {
-		return messages
-	}
-	// Keep system prompt + tail
-	trimmed := make([]Message, 0, maxMessages)
-	trimmed = append(trimmed, messages[0]) // system prompt
-	trimmed = append(trimmed, messages[len(messages)-(maxMessages-1):]...)
-	return trimmed
 }

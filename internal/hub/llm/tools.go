@@ -240,11 +240,37 @@ func ToolDefinitions() []Tool {
 				Parameters:  json.RawMessage(`{"type":"object","properties":{"hostname":{"type":"string","description":"Filter by host (optional)"},"limit":{"type":"integer","description":"Number of entries (default 20, max 200)"}}}`),
 			},
 		},
+		{
+			Type: "function",
+			Function: ToolFunction{
+				Name:        "recall_memory",
+				Description: "Recall past actions, fixes, and notes about a host (or the whole homelab) from persistent memory. Call this when you start working on a node to learn what was done before.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"hostname":{"type":"string","description":"Host to recall memories for (optional; omit for homelab-wide)"},"kind":{"type":"string","description":"Filter by kind: action, note, or all (default: all)","enum":["action","note","all"]},"limit":{"type":"integer","description":"Max entries (default 25, max 200)"}}}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: ToolFunction{
+				Name:        "remember",
+				Description: "Store a note in persistent memory for future sessions. Record durable facts not derivable from live data: fixes applied and why, known issues, config locations, user preferences, upgrade procedures.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"title":{"type":"string","description":"Short summary (e.g. 'Fixed pihole DNS loop')"},"detail":{"type":"string","description":"Full note with context, commands used, and reasoning"},"hostname":{"type":"string","description":"Host this note concerns (optional; omit for homelab-wide)"}},"required":["title"]}`),
+			},
+		},
 	}
 }
 
 // Execute runs a tool call and returns the result as a string.
+// Successful management actions are automatically recorded in the node
+// memory so future agent sessions can recall them.
 func (e *ToolExecutor) Execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
+	result, err := e.execute(ctx, name, args)
+	if err == nil && isManagementTool(name) && !strings.Contains(result, `"error"`) {
+		e.recordActionMemory(ctx, name, args, result)
+	}
+	return result, err
+}
+
+func (e *ToolExecutor) execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
 	switch name {
 	// Read tools
 	case "list_hosts":
@@ -290,6 +316,10 @@ func (e *ToolExecutor) Execute(ctx context.Context, name string, args json.RawMe
 		return e.runCommand(ctx, args)
 	case "list_exec_history":
 		return e.listExecHistory(ctx, args)
+	case "recall_memory":
+		return e.recallMemory(ctx, args)
+	case "remember":
+		return e.remember(ctx, args)
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
@@ -1326,6 +1356,189 @@ func (e *ToolExecutor) listExecHistory(ctx context.Context, args json.RawMessage
 		})
 	}
 	return string(mustJSON(out)), nil
+}
+
+// ---------- memory ----------
+
+// managementTools lists tools whose successful execution is auto-recorded
+// in the node memory.
+var managementTools = map[string]bool{
+	"docker_control": true, "trigger_network_scan": true, "send_notification": true,
+	"update_settings": true, "rename_host": true, "set_device_type": true,
+	"delete_host": true, "manage_integration": true, "check_vendors": true,
+	"add_peer": true, "run_command": true,
+}
+
+func isManagementTool(name string) bool { return managementTools[name] }
+
+// recordActionMemory writes one memory entry describing a completed action,
+// scoped to the node it affected (or global).
+func (e *ToolExecutor) recordActionMemory(ctx context.Context, name string, args json.RawMessage, result string) {
+	var p struct {
+		Hostname   string `json:"hostname"`
+		Container  string `json:"container"`
+		Action     string `json:"action"`
+		Command    string `json:"command"`
+		Name       string `json:"name"`
+		NewName    string `json:"new_name"`
+		DeviceType string `json:"device_type"`
+		Address    string `json:"address"`
+		Title      string `json:"title"`
+	}
+	json.Unmarshal(args, &p)
+
+	var hostID, hostname string
+	if p.Hostname != "" {
+		if h := e.findHost(ctx, p.Hostname); h != nil {
+			hostID = h.ID
+			hostname = h.Label()
+		} else {
+			hostname = p.Hostname
+		}
+	}
+	if hostID == "" && name == "run_command" {
+		// local execution: attribute to this node
+		hostID = e.identity.ID
+		hostname = e.identity.Hostname
+	}
+
+	scope := "global"
+	if hostID != "" {
+		scope = "node:" + hostID
+	}
+
+	title := name
+	switch name {
+	case "docker_control":
+		title = fmt.Sprintf("Docker: %s %s", p.Action, p.Container)
+		if hostname != "" {
+			title += " on " + hostname
+		}
+	case "run_command":
+		title = fmt.Sprintf("Command on %s: %s", firstOr(hostname, "local node"), truncate(p.Command, 80))
+	case "rename_host":
+		title = fmt.Sprintf("Renamed %s to %s", p.Hostname, p.NewName)
+	case "set_device_type":
+		title = fmt.Sprintf("Set %s type to %s", p.Hostname, p.DeviceType)
+	case "delete_host":
+		title = fmt.Sprintf("Deleted host %s", p.Hostname)
+	case "manage_integration":
+		title = fmt.Sprintf("Integration %s: %s", p.Action, p.Name)
+	case "add_peer":
+		title = fmt.Sprintf("Added mesh peer %s", p.Address)
+	case "send_notification":
+		title = fmt.Sprintf("Sent notification: %s", p.Title)
+	case "update_settings":
+		title = "Updated settings"
+	case "trigger_network_scan":
+		title = "Triggered network scan"
+	}
+
+	if err := e.store.InsertMemory(ctx, &store.Memory{
+		HostID:    hostID,
+		Hostname:  hostname,
+		Scope:     scope,
+		Kind:      "action",
+		Title:     title,
+		Detail:    truncate(result, 500),
+		Source:    "agent",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		// memory recording must never break the action itself
+		_ = err
+	}
+}
+
+func (e *ToolExecutor) recallMemory(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Hostname string `json:"hostname"`
+		Kind     string `json:"kind"`
+		Limit    int    `json:"limit"`
+	}
+	json.Unmarshal(args, &params)
+	if params.Kind == "all" {
+		params.Kind = ""
+	}
+
+	hostID := ""
+	if params.Hostname != "" {
+		h := e.findHost(ctx, params.Hostname)
+		if h == nil {
+			return fmt.Sprintf(`{"error":"host %q not found"}`, params.Hostname), nil
+		}
+		hostID = h.ID
+	}
+
+	memories, err := e.store.ListMemories(ctx, hostID, params.Kind, params.Limit)
+	if err != nil {
+		return "", err
+	}
+	type memEntry struct {
+		Host   string `json:"host,omitempty"`
+		Kind   string `json:"kind"`
+		Title  string `json:"title"`
+		Detail string `json:"detail,omitempty"`
+		Source string `json:"source"`
+		When   string `json:"when"`
+	}
+	var out []memEntry
+	for _, m := range memories {
+		out = append(out, memEntry{
+			Host:   m.Hostname,
+			Kind:   m.Kind,
+			Title:  m.Title,
+			Detail: truncate(m.Detail, 300),
+			Source: m.Source,
+			When:   m.CreatedAt.Format("2006-01-02 15:04"),
+		})
+	}
+	return string(mustJSON(out)), nil
+}
+
+func (e *ToolExecutor) remember(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Title    string `json:"title"`
+		Detail   string `json:"detail"`
+		Hostname string `json:"hostname"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", err
+	}
+	if params.Title == "" {
+		return `{"error":"title is required"}`, nil
+	}
+
+	var hostID, hostname, scope string = "", "", "global"
+	if params.Hostname != "" {
+		h := e.findHost(ctx, params.Hostname)
+		if h == nil {
+			return fmt.Sprintf(`{"error":"host %q not found"}`, params.Hostname), nil
+		}
+		hostID = h.ID
+		hostname = h.Label()
+		scope = "node:" + hostID
+	}
+
+	if err := e.store.InsertMemory(ctx, &store.Memory{
+		HostID:    hostID,
+		Hostname:  hostname,
+		Scope:     scope,
+		Kind:      "note",
+		Title:     params.Title,
+		Detail:    params.Detail,
+		Source:    "llm",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		return fmt.Sprintf(`{"error":"%s"}`, err.Error()), nil
+	}
+	return string(mustJSON(map[string]string{"ok": "true", "remembered": params.Title})), nil
+}
+
+func firstOr(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
 }
 
 // ---------- helpers ----------

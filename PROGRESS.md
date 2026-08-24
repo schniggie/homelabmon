@@ -13,6 +13,7 @@
 | 6 | Security & Polish | `COMPLETE` | mTLS, enrollment, auth, install scripts, systemd/launchd/Windows service, config hot-reload, peer federation |
 | 7 | LLM Management Agent | `COMPLETE` | Full platform tool access for the chat agent: docker control across the mesh, scans, notifications, settings, host/integration/peer management with confirmation gates |
 | 8 | Remote Commands | `COMPLETE` | Devops-grade remote execution on Linux/Windows/macOS/FreeBSD nodes: --exec opt-in, per-command confirmation, process-group timeouts, audit trail, OPNsense support |
+| 9 | Agent Memory & Chat History | `COMPLETE` | Persistent per-node memory (auto-recorded actions + agent notes), cross-session recall, persisted chat sessions with LLM-generated titles |
 
 ---
 
@@ -427,6 +428,24 @@
 
 ---
 
+## Phase 9: Agent Memory & Chat History
+
+**Goal:** All actions and tasks performed on nodes are recorded, organized, and available to the agent in every future session; chat sessions persist with LLM-generated titles.
+
+- [x] Migration 010: `memories` (scoped node:<id>/global, kinds action/note) + `chat_sessions`/`chat_messages` tables
+- [x] `store/memory.go` + `store/chatsessions.go`: insert/list memories, session CRUD, conditional title update
+- [x] Every successful management tool call auto-records a memory (docker_control, run_command, update_settings, ...) with a per-tool summary title, scoped to the affected node
+- [x] `recall_memory` / `remember` tools; system prompt directs the agent to recall on node work and store durable notes after significant work
+- [x] ChatHandler refactored to store-backed sessions: history loads from DB, user+assistant turns (incl. action log JSON) persisted, survives restarts
+- [x] LLM-generated session titles: async one-shot call after the first exchange, never blocks the chat response; falls back to truncated user message
+- [x] API: GET /api/v1/llm/sessions, GET .../sessions/{id}/messages, DELETE .../sessions/{id}
+- [x] Chat UI: collapsible History panel (titles, timestamps, active highlight, per-session delete), + New chat button
+- [x] Fixed `recall_memory` kind="all" literal filter (live test caught it: model passes "all" verbatim)
+- [x] Tests: fake Ollama httptest server drives ChatHandler end-to-end (persistence, titles, context reload); auto-record + remember/recall unit tests
+- [x] Live-verified against qwen3.8:27b-mlx: notes stored by agent, recalled in a brand-new session ("maintenance window Sunday, backups at /mnt/backup"), 3 sessions auto-titled, action auto-recorded, sessions survived restart
+
+---
+
 ## Decision Log
 
 | Date | Decision | Rationale |
@@ -477,6 +496,10 @@
 | 2026-08-24 | Process groups on Unix + WaitDelay | Killing the shell alone orphans children that hold stdout/stderr open; tests caught Run() blocking 30s+ past timeout |
 | 2026-08-24 | exec_history table on requesting node | Auditable trail of agent-driven changes, queryable by the agent itself (list_exec_history) |
 | 2026-08-24 | FreeBSD targets (amd64/arm64) | OPNsense firewall support; pure-Go stack (modernc sqlite) cross-compiles cleanly |
+| 2026-08-24 | Memory = auto-recorded actions + agent notes | Actions need no model cooperation; notes capture the "why" that live data can't -- recall tools surface both per node |
+| 2026-08-24 | Memory recording never fails the action | Insert errors are swallowed; recording is observability, not a side effect the caller must handle |
+| 2026-08-24 | Async title generation after first exchange | One extra LLM call per session, off the critical path; falls back to truncated user message on error |
+| 2026-08-24 | Sessions persisted with action-log JSON | The UI replays past sessions including which tools ran, not just text |
 
 ---
 

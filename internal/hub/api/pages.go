@@ -562,6 +562,54 @@ func (u *UIServer) handleLLMClear(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+func (u *UIServer) handleLLMSessions(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	sessions, err := u.store.ListChatSessions(r.Context(), 50)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	if sessions == nil {
+		sessions = []store.ChatSession{}
+	}
+	json.NewEncoder(w).Encode(sessions)
+}
+
+func (u *UIServer) handleLLMSessionMessages(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	id := r.PathValue("id")
+	messages, err := u.store.GetChatMessages(r.Context(), id, 100)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	type msg struct {
+		Role    string          `json:"role"`
+		Content string          `json:"content"`
+		Actions json.RawMessage `json:"actions"`
+	}
+	out := make([]msg, 0, len(messages))
+	for _, m := range messages {
+		actions := json.RawMessage("[]")
+		if m.Actions != "" {
+			actions = json.RawMessage(m.Actions)
+		}
+		out = append(out, msg{Role: m.Role, Content: m.Content, Actions: actions})
+	}
+	json.NewEncoder(w).Encode(out)
+}
+
+func (u *UIServer) handleLLMDeleteSession(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	id := r.PathValue("id")
+	if err := u.store.DeleteChatSession(r.Context(), id); err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
 // Host management handlers
 
 func (u *UIServer) handleRenameHost(w http.ResponseWriter, r *http.Request) {

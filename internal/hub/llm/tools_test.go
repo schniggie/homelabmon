@@ -370,3 +370,68 @@ func TestRunCommandUnavailable(t *testing.T) {
 		t.Errorf("expected unavailable error without router, got: %s", res)
 	}
 }
+
+func TestManagementActionsAutoRecorded(t *testing.T) {
+	e, st := newTestExecutor(t)
+	seedHost(t, st, models.Host{ID: "node-b", Hostname: "beta", MonitorType: "agent", Status: "online"})
+	if err := st.UpsertService(context.Background(), &models.DiscoveredService{
+		HostID: "node-b", Name: "nginx", Port: 80, Category: "container",
+		Source: "docker", ContainerID: "abc123def456", ContainerImg: "nginx:latest",
+		Status: "active", LastSeen: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed service: %v", err)
+	}
+	e.SetDockerRouter(&fakeDockerRouter{})
+
+	// successful docker action records a node-scoped memory
+	e.Execute(context.Background(), "docker_control",
+		json.RawMessage(`{"container":"nginx","hostname":"beta","action":"start"}`))
+	memories, _ := st.ListMemories(context.Background(), "node-b", "action", 10)
+	if len(memories) != 1 {
+		t.Fatalf("expected 1 memory, got %d", len(memories))
+	}
+	if !strings.Contains(memories[0].Title, "start nginx") || memories[0].Hostname != "beta" {
+		t.Errorf("memory wrong: %+v", memories[0])
+	}
+
+	// failed/refused actions are NOT recorded
+	e.Execute(context.Background(), "docker_control",
+		json.RawMessage(`{"container":"nginx","hostname":"beta","action":"stop"}`)) // no confirm
+	memories, _ = st.ListMemories(context.Background(), "node-b", "action", 10)
+	if len(memories) != 1 {
+		t.Errorf("refused action must not be recorded: %d", len(memories))
+	}
+}
+
+func TestRememberAndRecall(t *testing.T) {
+	e, st := newTestExecutor(t)
+	seedHost(t, st, models.Host{ID: "node-c", Hostname: "gamma", MonitorType: "agent", Status: "online"})
+
+	// agent stores a node note
+	res, err := e.Execute(context.Background(), "remember",
+		json.RawMessage(`{"title":"Pihole runs in compose stack dns","detail":"config at /etc/pihole, restart via docker compose","hostname":"gamma"}`))
+	if err != nil || !strings.Contains(res, `"ok":"true"`) {
+		t.Fatalf("remember failed: %v %s", err, res)
+	}
+
+	// recalling for that host returns the note
+	res, _ = e.Execute(context.Background(), "recall_memory",
+		json.RawMessage(`{"hostname":"gamma"}`))
+	if !strings.Contains(res, "Pihole runs in compose stack dns") {
+		t.Errorf("recall missing note: %s", res)
+	}
+
+	// kind="all" must not filter anything out (LLMs pass it literally)
+	res, _ = e.Execute(context.Background(), "recall_memory",
+		json.RawMessage(`{"kind":"all"}`))
+	if !strings.Contains(res, "Pihole runs in compose stack dns") {
+		t.Errorf(`recall with kind="all" missing note: %s`, res)
+	}
+
+	// unknown host refused
+	res, _ = e.Execute(context.Background(), "recall_memory",
+		json.RawMessage(`{"hostname":"nonexistent"}`))
+	if !strings.Contains(res, "error") {
+		t.Errorf("expected error for unknown host: %s", res)
+	}
+}

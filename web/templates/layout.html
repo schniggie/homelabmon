@@ -91,10 +91,34 @@
                     <span class="text-[10px] mr-1" :class="connected ? 'text-green-400' : 'text-red-400'">
                         <i class="fa-solid fa-circle"></i>
                     </span>
-                    <button @click="clearChat()"
-                        class="text-gray-500 hover:text-gray-300 px-1 py-0.5 text-xs" title="Clear chat">
-                        <i class="fa-solid fa-trash"></i>
+                    <button @click="newSession()"
+                        class="text-gray-500 hover:text-gray-300 px-1 py-0.5 text-xs" title="New chat">
+                        <i class="fa-solid fa-plus"></i>
                     </button>
+                </div>
+            </div>
+
+            <!-- Session History -->
+            <div class="border-b border-gray-800 px-3 py-1.5" x-data="{ open: false }">
+                <button @click="open = !open; if (open) loadSessions()"
+                    class="w-full flex items-center justify-between text-[10px] text-gray-400 hover:text-gray-200">
+                    <span><i class="fa-solid fa-clock-rotate-left mr-1"></i>History</span>
+                    <i class="fa-solid fa-chevron-down text-[8px] transition-transform" :class="open && 'rotate-180'"></i>
+                </button>
+                <div x-show="open" x-cloak class="mt-1.5 space-y-0.5 max-h-44 overflow-y-auto">
+                    <template x-for="s in sessions" :key="s.id">
+                        <div class="group flex items-center justify-between bg-gray-800 hover:bg-gray-700 rounded px-2 py-1 cursor-pointer"
+                            :class="s.id === sessionId ? 'ring-1 ring-purple-500' : ''"
+                            @click="openSession(s.id)">
+                            <div class="flex-1 min-w-0 mr-1">
+                                <p class="text-[11px] truncate" x-text="s.title || 'Untitled'"></p>
+                                <p class="text-[9px] text-gray-500" x-text="new Date(s.updated_at).toLocaleString()"></p>
+                            </div>
+                            <i class="fa-solid fa-trash text-[9px] text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100"
+                                @click.stop="deleteSession(s.id)" title="Delete session"></i>
+                        </div>
+                    </template>
+                    <p x-show="sessions.length === 0" class="text-[10px] text-gray-600 text-center py-1">No saved sessions yet</p>
                 </div>
             </div>
 
@@ -189,6 +213,7 @@
         return {
             side: localStorage.getItem('hlm-chat-side') || 'right',
             messages: [],
+            sessions: [],
             input: '',
             loading: false,
             connected: false,
@@ -250,12 +275,44 @@
             },
 
             clearChat() {
+                this.newSession();
+            },
+
+            newSession() {
+                this.sessionId = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString();
                 this.messages = [];
-                fetch('/api/v1/llm/clear', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ session_id: this.sessionId })
-                });
+                this.input = '';
+            },
+
+            async loadSessions() {
+                try {
+                    const resp = await fetch('/api/v1/llm/sessions');
+                    this.sessions = await resp.json();
+                } catch {
+                    this.sessions = [];
+                }
+            },
+
+            async openSession(id) {
+                try {
+                    const resp = await fetch('/api/v1/llm/sessions/' + id + '/messages');
+                    const msgs = await resp.json();
+                    this.sessionId = id;
+                    this.messages = (msgs || []).map(m => ({
+                        role: m.role,
+                        content: m.content,
+                        actions: m.actions || []
+                    }));
+                    this.scrollToBottom();
+                } catch {}
+            },
+
+            async deleteSession(id) {
+                try {
+                    await fetch('/api/v1/llm/sessions/' + id, { method: 'DELETE' });
+                    if (id === this.sessionId) this.newSession();
+                    this.loadSessions();
+                } catch {}
             },
 
             scrollToBottom() {

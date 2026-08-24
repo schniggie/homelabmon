@@ -239,7 +239,7 @@ func runAgent(cmd *cobra.Command, args []string) error {
 		if err := llmClient.Ping(ctx); err != nil {
 			log.Warn().Err(err).Str("url", llmURL).Msg("Ollama not reachable, chat disabled")
 		} else {
-			chatHandler = llm.NewChatHandler(llmClient, executor)
+			chatHandler = llm.NewChatHandler(llmClient, executor, st)
 			log.Info().Str("url", llmURL).Str("model", llmModel).Msg("LLM agent enabled (full platform tool access)")
 		}
 	}
