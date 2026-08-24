@@ -73,11 +73,14 @@ func (t *Transport) Start(bindAddr string) error {
 		handler = t.handler
 	}
 	t.server = &http.Server{
-		Addr:         bindAddr,
-		Handler:      handler,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:              bindAddr,
+		Handler:           handler,
+		ReadHeaderTimeout: 15 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		// No WriteTimeout: legitimate responses can run long (LLM chat
+		// loops, exec commands up to 600s); IdleTimeout handles stuck
+		// keep-alive connections.
+		IdleTimeout: 120 * time.Second,
 	}
 
 	if t.pki != nil && t.pki.Ready() {
