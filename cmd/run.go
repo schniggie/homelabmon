@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/dx111ge/homelabmon/internal/agent/integrations"
 	"github.com/dx111ge/homelabmon/internal/agent/observers"
 	"github.com/dx111ge/homelabmon/internal/agent/scanners"
+	"github.com/dx111ge/homelabmon/internal/diag"
 	hubapi "github.com/dx111ge/homelabmon/internal/hub/api"
 	"github.com/dx111ge/homelabmon/internal/hub/llm"
 	"github.com/dx111ge/homelabmon/internal/mesh"
@@ -455,8 +457,15 @@ func runAgent(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	// 14. Background: mark stale hosts offline if 2 heartbeats missed (~2.5 min) + notify
+	// 14. Background: mark stale hosts offline + notify
+	// Agents heartbeat every 60s -> offline after ~2.5 missed beats.
+	// Passive devices are only seen by network scans (scan-interval,
+	// default 5 min) -> offline only after missing two scan cycles.
+	// Passive devices (phones, TVs) come and go by nature: status is
+	// updated for the dashboard, but they never raise alerts.
 	go func() {
+		agentThreshold := 150 * time.Second
+		passiveThreshold := time.Duration(2*viper.GetInt("scan-interval"))*time.Second + 90*time.Second
 		ticker := time.NewTicker(1 * time.Minute)
 		defer ticker.Stop()
 		for {
@@ -464,9 +473,19 @@ func runAgent(cmd *cobra.Command, args []string) error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				stale, _ := st.MarkStaleHostsOffline(ctx, 150*time.Second)
+				// This node is obviously alive while this loop runs;
+				// keep our own host record fresh. Peers would do this via
+				// heartbeats, but a standalone node has no peers.
+				st.UpdateHostStatus(ctx, nodeID, "online")
+
+				stale, _ := st.MarkStaleHostsOffline(ctx, agentThreshold, passiveThreshold)
 				for _, h := range stale {
+					if h.MonitorType == "passive" {
+						diag.Record("host_offline", h.Hostname+" not seen by recent scans (passive)", "host", h.Hostname, "type", "passive")
+						continue
+					}
 					log.Warn().Str("host", h.Hostname).Msg("host went offline")
+					diag.Record("host_offline", h.Hostname+" went offline", "host", h.Hostname, "type", h.MonitorType)
 					dispatcher.Send(notify.FormatHostOffline(h.ID, h.Hostname))
 				}
 			}
@@ -539,6 +558,7 @@ func runAgent(cmd *cobra.Command, args []string) error {
 	})
 
 	log.Info().Str("bind", bindAddr).Bool("ui", viper.GetBool("ui")).Msg("homelabmon running")
+	diag.Record("startup", "node started", "version", Version, "bind", bindAddr, "site", site)
 
 	// Wait for shutdown signal
 	sigCh := make(chan os.Signal, 1)
@@ -691,6 +711,8 @@ func runNetworkScan(ctx context.Context, arpScanner *scanners.ARPScanner, mdnsSc
 		sources = append(sources, "mdns")
 	}
 	log.Info().Int("devices", stored).Strs("sources", sources).Msg("network scan complete")
+	diag.Record("scan", fmt.Sprintf("network scan complete: %d devices", stored),
+		"devices", strconv.Itoa(stored), "sources", strings.Join(sources, ","))
 	return stored
 }
 

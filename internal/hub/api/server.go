@@ -147,6 +147,9 @@ func (u *UIServer) SetupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/llm/sessions/{id}/messages", u.handleLLMSessionMessages)
 	mux.HandleFunc("DELETE /api/v1/llm/sessions/{id}", u.handleLLMDeleteSession)
 
+	// Debug (auth-protected; not a mesh route)
+	mux.HandleFunc("GET /api/v1/debug/diagnostics", u.handleDebugDiagnostics)
+
 	// Host management
 	mux.HandleFunc("POST /api/v1/hosts/{id}/rename", u.handleRenameHost)
 	mux.HandleFunc("POST /api/v1/hosts/{id}/type", u.handleUpdateDeviceType)

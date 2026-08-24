@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dx111ge/homelabmon/internal/diag"
 	"github.com/dx111ge/homelabmon/internal/models"
 	"github.com/dx111ge/homelabmon/internal/store"
 	"github.com/rs/zerolog/log"
@@ -156,6 +157,8 @@ func (h *HeartbeatService) sendToPeer(ctx context.Context, peer models.PeerInfo,
 	resp, err := h.client.Do(req)
 	if err != nil {
 		log.Debug().Err(err).Str("peer", peer.Hostname).Msg("heartbeat send failed")
+		diag.Record("heartbeat_fail", "heartbeat to "+peer.Hostname+" failed",
+			"peer", peer.Hostname, "addr", peer.Address, "error", err.Error())
 		h.store.UpdateHostStatus(ctx, peer.ID, "offline")
 		return
 	}

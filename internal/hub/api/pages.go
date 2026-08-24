@@ -10,6 +10,7 @@ import (
 
 	"github.com/dx111ge/homelabmon/internal/agent/integrations"
 	"github.com/dx111ge/homelabmon/internal/agent/scanners"
+	"github.com/dx111ge/homelabmon/internal/diag"
 	"github.com/dx111ge/homelabmon/internal/models"
 	"github.com/dx111ge/homelabmon/internal/notify"
 	"github.com/dx111ge/homelabmon/internal/plugin"
@@ -608,6 +609,101 @@ func (u *UIServer) handleLLMDeleteSession(w http.ResponseWriter, r *http.Request
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleDebugDiagnostics answers "what has this node been doing?" without
+// shell access: host/peer freshness, stale thresholds, and recent events.
+func (u *UIServer) handleDebugDiagnostics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	now := time.Now().UTC()
+	age := func(t time.Time) int {
+		if t.IsZero() {
+			return -1
+		}
+		return int(now.Sub(t).Seconds())
+	}
+
+	type hostDiag struct {
+		Hostname     string `json:"hostname"`
+		MonitorType  string `json:"monitor_type"`
+		Status       string `json:"status"`
+		LastSeen     string `json:"last_seen"`
+		LastSeenAgeS int    `json:"last_seen_age_sec"`
+		StaleAfterS  int    `json:"stale_after_sec"`
+		LooksStale   bool   `json:"looks_stale"`
+	}
+	type peerDiag struct {
+		ID         string `json:"id"`
+		Hostname   string `json:"hostname,omitempty"`
+		Address    string `json:"address"`
+		Status     string `json:"status"`
+		LastHeartb string `json:"last_heartbeat"`
+		AgeS       int    `json:"age_sec"`
+		Version    string `json:"version,omitempty"`
+		Site       string `json:"site,omitempty"`
+	}
+
+	agentThreshold := 150
+	passiveThreshold := int((time.Duration(2*viper.GetInt("scan-interval"))*time.Second + 90*time.Second) / time.Second)
+
+	var hosts []hostDiag
+	if all, err := u.store.ListHosts(r.Context()); err == nil {
+		for _, h := range all {
+			staleAfter := agentThreshold
+			if h.MonitorType == "passive" {
+				staleAfter = passiveThreshold
+			}
+			a := age(h.LastSeen)
+			hosts = append(hosts, hostDiag{
+				Hostname:     h.Hostname,
+				MonitorType:  h.MonitorType,
+				Status:       h.Status,
+				LastSeen:     h.LastSeen.Format("2006-01-02 15:04:05"),
+				LastSeenAgeS: a,
+				StaleAfterS:  staleAfter,
+				LooksStale:   a < 0 || a > staleAfter,
+			})
+		}
+	}
+
+	var peers []peerDiag
+	if list, err := u.store.ListPeers(r.Context()); err == nil {
+		for _, p := range list {
+			last := ""
+			if p.LastHeartbeat != nil {
+				last = p.LastHeartbeat.Format("2006-01-02 15:04:05")
+			}
+			pd := peerDiag{ID: p.ID, Hostname: p.Hostname, Address: p.Address,
+				Status: p.Status, LastHeartb: last, Version: p.Version, Site: p.Site}
+			if p.LastHeartbeat != nil {
+				pd.AgeS = age(*p.LastHeartbeat)
+			} else {
+				pd.AgeS = -1
+			}
+			peers = append(peers, pd)
+		}
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"now":        now.Format("2006-01-02 15:04:05"),
+		"uptime_sec": int(time.Since(diag.StartedAt()).Seconds()),
+		"node": map[string]string{
+			"id": u.identity.ID, "hostname": u.identity.Hostname,
+			"version": u.identity.Version, "bind": u.identity.BindAddr,
+			"site": u.identity.Site,
+		},
+		"heartbeat_interval_sec": 60,
+		"stale_thresholds": map[string]int{
+			"agent_sec":   agentThreshold,
+			"passive_sec": passiveThreshold,
+		},
+		"scan_enabled":    u.scanEnabled,
+		"scan_interval_s": viper.GetInt("scan-interval"),
+		"hosts":           hosts,
+		"peers":           peers,
+		"events":          diag.Recent(100),
+	})
 }
 
 // Host management handlers

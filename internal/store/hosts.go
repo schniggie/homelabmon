@@ -148,25 +148,35 @@ func (s *Store) HostCountByType(ctx context.Context, monitorType string) (int, e
 
 // StaleHost is a host that was marked offline.
 type StaleHost struct {
-	ID       string
-	Hostname string
+	ID          string
+	Hostname    string
+	MonitorType string
 }
 
-// MarkStaleHostsOffline marks hosts as offline if they haven't been seen recently.
+// MarkStaleHostsOffline marks hosts as offline if they haven't been seen
+// recently. Agent hosts are expected to heartbeat every 60s; passive
+// devices are only seen by network scans (default every 5 minutes), so
+// their threshold must exceed the scan interval or every device flaps
+// offline between scans.
 // Returns the list of hosts that transitioned from online to offline.
-func (s *Store) MarkStaleHostsOffline(ctx context.Context, threshold time.Duration) ([]StaleHost, error) {
-	cutoff := time.Now().UTC().Add(-threshold).Format("2006-01-02 15:04:05")
+func (s *Store) MarkStaleHostsOffline(ctx context.Context, agentThreshold, passiveThreshold time.Duration) ([]StaleHost, error) {
+	agentCutoff := time.Now().UTC().Add(-agentThreshold).Format("2006-01-02 15:04:05")
+	passiveCutoff := time.Now().UTC().Add(-passiveThreshold).Format("2006-01-02 15:04:05")
 
 	// Find hosts about to go offline
-	rows, err := s.db.QueryContext(ctx,
-		"SELECT id, hostname FROM hosts WHERE status = 'online' AND last_seen < ?", cutoff)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, hostname, monitor_type FROM hosts
+		WHERE status = 'online' AND (
+			(monitor_type = 'passive' AND last_seen < ?) OR
+			(monitor_type != 'passive' AND last_seen < ?)
+		)`, passiveCutoff, agentCutoff)
 	if err != nil {
 		return nil, err
 	}
 	var stale []StaleHost
 	for rows.Next() {
 		var h StaleHost
-		if err := rows.Scan(&h.ID, &h.Hostname); err != nil {
+		if err := rows.Scan(&h.ID, &h.Hostname, &h.MonitorType); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -179,8 +189,12 @@ func (s *Store) MarkStaleHostsOffline(ctx context.Context, threshold time.Durati
 	}
 
 	// Mark them offline
-	_, err = s.db.ExecContext(ctx,
-		"UPDATE hosts SET status = 'offline' WHERE status = 'online' AND last_seen < ?", cutoff)
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE hosts SET status = 'offline'
+		WHERE status = 'online' AND (
+			(monitor_type = 'passive' AND last_seen < ?) OR
+			(monitor_type != 'passive' AND last_seen < ?)
+		)`, passiveCutoff, agentCutoff)
 	if err != nil {
 		return nil, err
 	}

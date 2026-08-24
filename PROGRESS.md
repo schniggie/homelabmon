@@ -14,6 +14,7 @@
 | 7 | LLM Management Agent | `COMPLETE` | Full platform tool access for the chat agent: docker control across the mesh, scans, notifications, settings, host/integration/peer management with confirmation gates |
 | 8 | Remote Commands | `COMPLETE` | Devops-grade remote execution on Linux/Windows/macOS/FreeBSD nodes: --exec opt-in, per-command confirmation, process-group timeouts, audit trail, OPNsense support |
 | 9 | Agent Memory & Chat History | `COMPLETE` | Persistent per-node memory (auto-recorded actions + agent notes), cross-session recall, persisted chat sessions with LLM-generated titles |
+| 10 | Diagnostics & Stability | `COMPLETE` | Debug API with event ring, fixed standalone-node self-host flapping and passive-device offline floods between scans |
 
 ---
 
@@ -446,6 +447,23 @@
 
 ---
 
+## Phase 10: Diagnostics & Stability
+
+**Goal:** Stop the "host went offline" flood on the hub; give the agent (and us) a proper debug API.
+
+Root causes found by probing the live hub (proxmox1, standalone, 27 hosts):
+1. A node never refreshed its OWN host record locally -- only peers do via heartbeats. With no peers, the node marked itself offline after 150s.
+2. Passive devices are only seen by scans (every 300s) but the stale threshold was a hardcoded 150s -- every phone/TV/IoT device flapped offline between scans and back online on the next scan, emitting a WRN + notification per device per cycle.
+
+- [x] Fix A: the stale-checker loop refreshes the node's own host record every tick (status online + last_seen)
+- [x] Fix B: per-monitor-type thresholds -- agents 150s (2.5 missed heartbeats), passive 2x scan-interval + 90s buffer; passive transitions never raise alerts (phones roam, not incidents)
+- [x] `internal/diag`: in-memory event ring (256) recording startup, host offline transitions, heartbeat failures, scan results
+- [x] `GET /api/v1/debug/diagnostics` (auth-protected): node identity, uptime, per-host last_seen age vs its threshold, peer heartbeat ages, thresholds, recent events
+- [x] Tests: per-type stale thresholds (store), ring buffer (diag)
+- [x] 4-minute standalone soak: own host stays online at age 4s (old build: offline at 150s), zero spurious events
+
+---
+
 ## Decision Log
 
 | Date | Decision | Rationale |
@@ -500,6 +518,10 @@
 | 2026-08-24 | Memory recording never fails the action | Insert errors are swallowed; recording is observability, not a side effect the caller must handle |
 | 2026-08-24 | Async title generation after first exchange | One extra LLM call per session, off the critical path; falls back to truncated user message on error |
 | 2026-08-24 | Sessions persisted with action-log JSON | The UI replays past sessions including which tools ran, not just text |
+| 2026-08-24 | Passive stale threshold = 2x scan interval | Passive devices exist only in scan snapshots; a sub-interval threshold guarantees flapping (found on live hub: 15 devices flapping every cycle) |
+| 2026-08-24 | Passive transitions never alert | Phones/TVs leaving WiFi is presence, not an incident; dashboard status still updates |
+| 2026-08-24 | Debug endpoint auth-protected, mesh routes stay open | Peer comm must work tokenless; diagnostics are for the operator/agent |
+| 2026-08-24 | Event ring in memory, not DB | Debugging "what just happened" needs zero friction; persistent audit lives in exec_history/memories |
 
 ---
 
