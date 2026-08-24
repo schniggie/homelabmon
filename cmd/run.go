@@ -92,6 +92,8 @@ func init() {
 	viper.BindPFlag("notify-disk-threshold", rootCmd.PersistentFlags().Lookup("notify-disk-threshold"))
 	viper.BindPFlag("no-auth", rootCmd.PersistentFlags().Lookup("no-auth"))
 	viper.BindPFlag("retention-days", rootCmd.PersistentFlags().Lookup("retention-days"))
+	viper.BindPFlag("enroll-url", rootCmd.PersistentFlags().Lookup("enroll-url"))
+	viper.BindPFlag("enroll-token", rootCmd.PersistentFlags().Lookup("enroll-token"))
 }
 
 func runAgent(cmd *cobra.Command, args []string) error {
@@ -287,6 +289,18 @@ func runAgent(cmd *cobra.Command, args []string) error {
 				transport.SetPKI(pki)
 				peerClient.SetTLSConfig(pki.ClientTLSConfig())
 				log.Info().Msg("mTLS enabled after enrollment")
+			}
+			// The CA node is our first peer; heartbeats start on the next
+			// tick (~60s) and gossip handles everything after that.
+			if host := enrollHost(enrollURL); host != "" {
+				now := time.Now().UTC()
+				st.UpsertPeer(ctx, &models.PeerInfo{
+					ID:            "pending-" + host,
+					Address:       host,
+					Status:        "unknown",
+					LastHeartbeat: &now,
+				})
+				log.Info().Str("peer", host).Msg("added CA node as initial peer")
 			}
 		}
 	}
@@ -804,6 +818,15 @@ func runIntegrationSync(ctx context.Context, st *store.Store) {
 func enrollWithCA(dir, nodeID, caURL, token string) error {
 	pki := mesh.NewPKI(dir)
 
+	// Normalize the CA URL: a trailing slash produces a doubled path, and
+	// enrollment always talks to the node's TLS listener (the CA exists
+	// precisely because mTLS is in use).
+	caURL = strings.TrimRight(caURL, "/")
+	if strings.HasPrefix(caURL, "http://") {
+		caURL = "https://" + strings.TrimPrefix(caURL, "http://")
+		log.Info().Str("url", caURL).Msg("using https for enrollment (CA node serves mTLS)")
+	}
+
 	// Generate a key + CSR
 	key, err := ecdsa.GenerateKey(elliptic.P256(), cryptorand.Reader)
 	if err != nil {
@@ -838,7 +861,7 @@ func enrollWithCA(dir, nodeID, caURL, token string) error {
 	}
 	resp, err := client.Post(caURL+"/api/v1/enroll", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("contact CA: %w", err)
+		return fmt.Errorf("contact CA at %s (is the node running with mTLS enabled?): %w", caURL, err)
 	}
 	defer resp.Body.Close()
 
@@ -877,6 +900,22 @@ func enrollWithCA(dir, nodeID, caURL, token string) error {
 	}
 
 	return nil
+}
+
+// enrollHost extracts host:port from an enrollment URL for use as a peer
+// address.
+func enrollHost(enrollURL string) string {
+	u := strings.TrimRight(enrollURL, "/")
+	if i := strings.Index(u, "://"); i >= 0 {
+		u = u[i+3:]
+	}
+	if i := strings.Index(u, "/"); i >= 0 {
+		u = u[:i] // strip any path
+	}
+	if u == "" || !strings.Contains(u, ":") {
+		return ""
+	}
+	return u
 }
 
 func loadOrCreateNodeID(dir string) string {

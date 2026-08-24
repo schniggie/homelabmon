@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dx111ge/homelabmon/internal/models"
@@ -113,9 +114,11 @@ func (t *Transport) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		t.scanCoordinator.RecordPeerScan(hb.NodeID, *hb.LastScanTime)
 	}
 
-	// Gossip: auto-add unknown peers from the sender's known list
+	// Gossip: auto-add unknown peers from the sender's known list.
+	// Placeholder ("pending-") entries are bootstrap targets, not real
+	// identities -- gossiping them would make nodes befriend themselves.
 	for _, gp := range hb.KnownPeers {
-		if gp.ID == t.identity.ID || gp.ID == hb.NodeID {
+		if gp.ID == t.identity.ID || gp.ID == hb.NodeID || strings.HasPrefix(gp.ID, "pending-") {
 			continue
 		}
 		existing, _ := t.store.GetPeer(r.Context(), gp.ID)

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -156,7 +157,7 @@ func (h *HeartbeatService) sendToPeer(ctx context.Context, peer models.PeerInfo,
 
 	resp, err := h.client.Do(req)
 	if err != nil {
-		log.Debug().Err(err).Str("peer", peer.Hostname).Msg("heartbeat send failed")
+		log.Warn().Err(err).Str("peer", peer.Hostname).Str("addr", peer.Address).Msg("heartbeat send failed")
 		diag.Record("heartbeat_fail", "heartbeat to "+peer.Hostname+" failed",
 			"peer", peer.Hostname, "addr", peer.Address, "error", err.Error())
 		h.store.UpdateHostStatus(ctx, peer.ID, "offline")
@@ -200,8 +201,8 @@ func (h *HeartbeatService) sendToPeer(ctx context.Context, peer models.PeerInfo,
 
 	// Gossip: auto-add unknown peers discovered via this peer
 	for _, gp := range peerHB.KnownPeers {
-		if gp.ID == h.identity.ID || gp.ID == peerHB.NodeID {
-			continue // skip self and the peer we just talked to
+		if gp.ID == h.identity.ID || gp.ID == peerHB.NodeID || strings.HasPrefix(gp.ID, "pending-") {
+			continue // skip self, the peer we just talked to, and placeholders
 		}
 		existing, _ := h.store.GetPeer(ctx, gp.ID)
 		if existing == nil {

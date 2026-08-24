@@ -138,9 +138,15 @@ func (p *PKI) GenerateNodeCert(nodeID string) error {
 }
 
 // Load loads existing CA and node certs from disk.
+// Load reads the CA cert, node cert, and node key. The CA private key is
+// optional: enrolled non-CA nodes correctly have no ca.key (it must never
+// leave the CA node), so Load must not require it. Only SignCSR needs it.
 func (p *PKI) Load() error {
-	if err := p.loadCA(); err != nil {
+	if err := p.loadCACert(); err != nil {
 		return err
+	}
+	if err := p.loadCAKey(); err != nil {
+		p.caKey = nil // absent on non-CA nodes; fine for TLS, not for signing
 	}
 
 	cert, err := tls.LoadX509KeyPair(
@@ -173,12 +179,30 @@ func (p *PKI) ServerTLSConfig() *tls.Config {
 	}
 }
 
-// ClientTLSConfig returns a TLS config for outbound connections.
+// ClientTLSConfig returns a TLS config for outbound connections. Homelab
+// peers are addressed by IP, and node certs can't carry every peer's IP as
+// a SAN -- identity in this mesh comes from the CA chain, not DNS. So the
+// peer certificate is verified against the pinned CA explicitly and
+// hostname matching is intentionally skipped.
 func (p *PKI) ClientTLSConfig() *tls.Config {
 	return &tls.Config{
-		Certificates: []tls.Certificate{p.nodeCert},
-		RootCAs:      p.certPool,
-		MinVersion:   tls.VersionTLS13,
+		Certificates:       []tls.Certificate{p.nodeCert},
+		InsecureSkipVerify: true, // hostname check replaced below
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("peer presented no certificate")
+			}
+			leaf, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return fmt.Errorf("parse peer cert: %w", err)
+			}
+			_, err = leaf.Verify(x509.VerifyOptions{
+				Roots:     p.certPool,
+				KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+			})
+			return err
+		},
+		MinVersion: tls.VersionTLS13,
 	}
 }
 
@@ -232,8 +256,17 @@ func GenerateEnrollToken() string {
 	return hex.EncodeToString(b)
 }
 
+// loadCA loads the CA cert AND key; used by SignCSR where the key is
+// mandatory (only the CA node can sign).
 func (p *PKI) loadCA() error {
-	if p.caCert != nil && p.caKey != nil {
+	if err := p.loadCACert(); err != nil {
+		return err
+	}
+	return p.loadCAKey()
+}
+
+func (p *PKI) loadCACert() error {
+	if p.caCert != nil {
 		return nil
 	}
 
@@ -249,12 +282,19 @@ func (p *PKI) loadCA() error {
 	if err != nil {
 		return fmt.Errorf("parse CA cert: %w", err)
 	}
+	return nil
+}
+
+func (p *PKI) loadCAKey() error {
+	if p.caKey != nil {
+		return nil
+	}
 
 	keyPEM, err := os.ReadFile(filepath.Join(p.DataDir, "ca.key"))
 	if err != nil {
 		return fmt.Errorf("read CA key: %w", err)
 	}
-	block, _ = pem.Decode(keyPEM)
+	block, _ := pem.Decode(keyPEM)
 	if block == nil {
 		return fmt.Errorf("decode CA key PEM")
 	}
@@ -262,7 +302,6 @@ func (p *PKI) loadCA() error {
 	if err != nil {
 		return fmt.Errorf("parse CA key: %w", err)
 	}
-
 	return nil
 }
 
