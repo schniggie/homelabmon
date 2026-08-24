@@ -1,4 +1,7 @@
 FROM golang:1.25-alpine AS builder
+# git lets the Go toolchain embed VCS revision/time into the binary,
+# so `homelabmon version` reports the real commit even without ldflags.
+RUN apk add --no-cache git
 ARG VERSION=dev
 ARG COMMIT=none
 ARG BUILD_DATE=unknown
