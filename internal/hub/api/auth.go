@@ -98,7 +98,11 @@ func (am *AuthManager) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-// isMeshRoute returns true for peer-to-peer API routes that should not require UI auth.
+// isMeshRoute returns true for peer-to-peer API routes that should not
+// require UI auth. Data routes (heartbeat etc.) are trusted like the
+// heartbeat itself; enrollment carries its own one-time token; exec and
+// docker control follow the --exec trust model (documented: anyone who can
+// reach the port -- use mTLS on untrusted networks).
 func isMeshRoute(path string) bool {
 	meshRoutes := []string{
 		"/api/v1/register",
@@ -108,6 +112,9 @@ func isMeshRoute(path string) bool {
 		"/api/v1/hosts",
 		"/api/v1/metrics/",
 		"/api/v1/services",
+		"/api/v1/enroll",
+		"/api/v1/exec",
+		"/api/v1/docker/control",
 	}
 	for _, r := range meshRoutes {
 		if path == r || strings.HasPrefix(path, r) {
