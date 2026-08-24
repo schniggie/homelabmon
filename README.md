@@ -18,6 +18,7 @@ A single-binary, zero-dependency homelab discovery and monitoring system with me
 - **Network scanning** -- ARP, mDNS, SNMP discover passive devices (phones, TVs, IoT, printers)
 - **Integrations** -- FRITZ!Box, Unifi, Home Assistant, Pi-hole, pfSense API pulls
 - **LLM chat** -- local Ollama integration: "What's running on my NAS?"
+- **AI agent** -- the chat can also *manage* the homelab: start/stop/restart Docker containers on any node, trigger scans, send notifications, change settings, rename/remove devices, test/sync integrations, and add mesh peers (with confirmation gates on destructive actions)
 - **Lightweight CMDB** -- all devices in one SQLite database
 - **Notifications** -- ntfy.sh + webhook alerts for host offline / resource thresholds
 - **Secure credentials** -- AES-256-GCM encrypted secret store, no passwords in CLI or env

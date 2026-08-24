@@ -135,19 +135,48 @@ Heartbeat every 60s. Bidirectional -- response includes peer's own heartbeat. Fa
 
 Local Ollama with tool-calling. Activated via `--llm http://localhost:11434 --llm-model qwen2.5:7b`.
 
-The LLM gets structured tool functions that query the CMDB:
+The LLM is a full homelab agent: it can query the CMDB **and manage the platform**.
+Tool calls are routed to the node that owns the target (loopback for the local
+node, peer address over mTLS for remote nodes) via `mesh.PeerClient`.
 
+Read tools:
 ```
-list_hosts(status?, monitor_type?)  -> all hosts, filterable by status and type
-get_host(hostname)                  -> details (case-insensitive partial match)
-get_metrics(hostname, hours?)       -> latest snapshot or history summary (avg/max CPU/mem)
-list_services(hostname?, category?) -> discovered services, filterable
-get_summary()                       -> fleet overview: counts, online/offline, services by type
+list_hosts(status?, monitor_type?)     -> all hosts, filterable by status and type
+get_host(hostname)                     -> details (case-insensitive partial match)
+get_metrics(hostname, hours?)          -> latest snapshot or history summary (avg/max CPU/mem)
+list_services(hostname?, category?)    -> discovered services, filterable
+get_summary()                          -> fleet overview: counts, online/offline, services by type
+list_docker_containers(hostname?)      -> containers with image, stack, health, ports, container ID
+list_peers()                           -> mesh peers: address, status, version, site
+list_integrations()                    -> FRITZ!Box/Unifi/HA/Pi-hole/pfSense with sync status
+get_settings()                         -> thresholds, retention, scan interval, notification channels
 ```
 
-Chat UI at `/ui/chat` with suggestion buttons and session history. Tool-calling loop (max 5 rounds) handles multi-step queries automatically.
+Management tools:
+```
+docker_control(container, hostname?, action, confirm?) -> start/stop/restart containers on any node
+trigger_network_scan()                                 -> run ARP+mDNS scan now, returns device count
+send_notification(title, message, severity?)           -> push via ntfy/webhook
+update_settings(...)                                   -> thresholds, retention, scan interval, URLs, site
+rename_host(hostname, new_name)                        -> set display name
+set_device_type(hostname, device_type)                 -> fix classification
+delete_host(hostname, confirm)                         -> remove from CMDB
+manage_integration(action, name, confirm?)             -> test / sync / delete integrations
+check_vendors()                                        -> re-resolve MAC OUI vendors
+add_peer(address)                                      -> connect a new node to the mesh
+```
 
-Users chat naturally: "What's running on the NAS?", "Any disk issues?", "Show me all Docker containers"
+Safety: disruptive actions (stop/restart container, delete host, delete integration)
+carry a `confirm` parameter. The system prompt instructs the model to ask the user
+first and only pass `confirm=true` after explicit agreement; the executor enforces
+the gate independently of the model. Executed actions are shown as badges in the
+chat UI and logged.
+
+Chat UI in the sidebar with suggestion buttons, session history, and an action
+trail. Tool-calling loop (max 8 rounds) handles multi-step queries automatically.
+
+Users chat naturally: "What's running on the NAS?", "Any disk issues?", "Show me
+all Docker containers", "Restart jellyfin on the NAS", "Scan the network now".
 
 ## Notifications
 

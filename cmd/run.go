@@ -22,20 +22,20 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
-	"github.com/google/uuid"
 	"github.com/dx111ge/homelabmon/configs"
 	"github.com/dx111ge/homelabmon/internal/agent"
 	"github.com/dx111ge/homelabmon/internal/agent/discovery"
-	"github.com/dx111ge/homelabmon/internal/agent/observers"
 	"github.com/dx111ge/homelabmon/internal/agent/integrations"
+	"github.com/dx111ge/homelabmon/internal/agent/observers"
 	"github.com/dx111ge/homelabmon/internal/agent/scanners"
 	hubapi "github.com/dx111ge/homelabmon/internal/hub/api"
 	"github.com/dx111ge/homelabmon/internal/hub/llm"
 	"github.com/dx111ge/homelabmon/internal/mesh"
-	"github.com/dx111ge/homelabmon/internal/notify"
 	"github.com/dx111ge/homelabmon/internal/models"
+	"github.com/dx111ge/homelabmon/internal/notify"
 	"github.com/dx111ge/homelabmon/internal/plugin"
 	"github.com/dx111ge/homelabmon/internal/store"
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
@@ -136,6 +136,10 @@ func runAgent(cmd *cobra.Command, args []string) error {
 		Site:     site,
 	}
 
+	// Peer client routes management calls (e.g. docker control) to the
+	// mesh node that owns the target host.
+	peerClient := mesh.NewPeerClient(identity, st)
+
 	log.Info().
 		Str("hostname", hostInfo.Hostname).
 		Str("os", hostInfo.OS).
@@ -215,9 +219,14 @@ func runAgent(cmd *cobra.Command, args []string) error {
 	collector.Start(ctx)
 	defer collector.Stop()
 
-	// 6. LLM (if --llm)
+	// 6. LLM (if --llm) -- the agent gets access to all platform tools:
+	// CMDB queries, docker control across the mesh, scans, notifications,
+	// settings, integrations, and host management.
 	var chatHandler *llm.ChatHandler
 	var llmClient *llm.Client
+	executor := llm.NewToolExecutor(st, identity)
+	executor.SetDockerRouter(peerClient)
+	executor.SetNotifier(dispatcher)
 	if llmURL := viper.GetString("llm"); llmURL != "" {
 		llmModel := viper.GetString("llm-model")
 		if llmModel == "" {
@@ -227,9 +236,8 @@ func runAgent(cmd *cobra.Command, args []string) error {
 		if err := llmClient.Ping(ctx); err != nil {
 			log.Warn().Err(err).Str("url", llmURL).Msg("Ollama not reachable, chat disabled")
 		} else {
-			executor := llm.NewToolExecutor(st)
 			chatHandler = llm.NewChatHandler(llmClient, executor)
-			log.Info().Str("url", llmURL).Str("model", llmModel).Msg("LLM chat enabled")
+			log.Info().Str("url", llmURL).Str("model", llmModel).Msg("LLM agent enabled (full platform tool access)")
 		}
 	}
 
@@ -253,6 +261,7 @@ func runAgent(cmd *cobra.Command, args []string) error {
 			log.Warn().Err(err).Msg("mTLS certs found but failed to load (running without TLS)")
 		} else {
 			transport.SetPKI(pki)
+			peerClient.SetTLSConfig(pki.ClientTLSConfig())
 			log.Info().Msg("mTLS enabled for mesh transport")
 		}
 	}
@@ -267,6 +276,7 @@ func runAgent(cmd *cobra.Command, args []string) error {
 			log.Info().Msg("enrolled successfully, loading certs")
 			if err := pki.Load(); err == nil {
 				transport.SetPKI(pki)
+				peerClient.SetTLSConfig(pki.ClientTLSConfig())
 				log.Info().Msg("mTLS enabled after enrollment")
 			}
 		}
@@ -281,12 +291,15 @@ func runAgent(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("create UI server: %w", err)
 		}
+		uiServer.PeerClient = peerClient
 		if scanEnabled {
-			uiServer.ScanFunc = func() (int, error) {
+			scanOnce := func() (int, error) {
 				count := runNetworkScan(ctx, arpScanner, mdnsScanner, st)
 				scanCoord.RecordLocalScan()
 				return count, nil
 			}
+			uiServer.ScanFunc = scanOnce
+			executor.SetScanFunc(scanOnce)
 		}
 		uiServer.SetupRoutes(transport.Mux())
 

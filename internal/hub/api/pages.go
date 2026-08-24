@@ -1,10 +1,8 @@
 package api
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -531,14 +529,17 @@ func (u *UIServer) handleLLMChat(w http.ResponseWriter, r *http.Request) {
 		req.SessionID = "default"
 	}
 
-	response, err := u.chatHandler.Chat(r.Context(), req.SessionID, req.Message)
+	response, actions, err := u.chatHandler.Chat(r.Context(), req.SessionID, req.Message)
 	if err != nil {
 		log.Error().Err(err).Msg("LLM chat error")
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 
-	json.NewEncoder(w).Encode(map[string]string{"response": response})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"response": response,
+		"actions":  actions,
+	})
 }
 
 func (u *UIServer) handleLLMClear(w http.ResponseWriter, r *http.Request) {
@@ -887,40 +888,17 @@ func (u *UIServer) handleDockerControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If it's our own node, call the mesh endpoint locally
-	if req.HostID == u.identity.ID {
-		body, _ := json.Marshal(map[string]string{"container_id": req.ContainerID, "action": req.Action})
-		resp, err := http.Post("http://127.0.0.1"+viper.GetString("bind")+"/api/v1/docker/control",
-			"application/json", bytes.NewReader(body))
-		if err != nil {
-			writeJSONResp(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		defer resp.Body.Close()
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
+	if u.PeerClient == nil {
+		writeJSONResp(w, http.StatusServiceUnavailable, map[string]string{"error": "peer routing not available"})
 		return
 	}
 
-	// Find the peer address for the host
-	peer, err := u.store.GetPeer(r.Context(), req.HostID)
-	if err != nil || peer == nil {
-		writeJSONResp(w, http.StatusNotFound, map[string]string{"error": "peer not found"})
+	if err := u.PeerClient.DockerControl(r.Context(), req.HostID, req.ContainerID, req.Action); err != nil {
+		log.Warn().Err(err).Str("container", req.ContainerID).Str("action", req.Action).Msg("docker control failed")
+		writeJSONResp(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-
-	body, _ := json.Marshal(map[string]string{"container_id": req.ContainerID, "action": req.Action})
-	peerURL := fmt.Sprintf("http://%s/api/v1/docker/control", peer.Address)
-	resp, err := http.Post(peerURL, "application/json", bytes.NewReader(body))
-	if err != nil {
-		writeJSONResp(w, http.StatusBadGateway, map[string]string{"error": "peer unreachable: " + err.Error()})
-		return
-	}
-	defer resp.Body.Close()
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	writeJSONResp(w, http.StatusOK, map[string]string{"ok": "true"})
 }
 
 func writeJSONResp(w http.ResponseWriter, status int, v interface{}) {

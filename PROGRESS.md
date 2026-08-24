@@ -11,6 +11,7 @@
 | 4b | Charts & Device Mgmt | `COMPLETE` | Inline statistics (Chart.js), device category/delete, display names |
 | 5 | Integrations | `COMPLETE` | FRITZ!Box, Unifi, HA, Pi-hole, pfSense, SNMP scanner, external plugins |
 | 6 | Security & Polish | `COMPLETE` | mTLS, enrollment, auth, install scripts, systemd/launchd/Windows service, config hot-reload, peer federation |
+| 7 | LLM Management Agent | `COMPLETE` | Full platform tool access for the chat agent: docker control across the mesh, scans, notifications, settings, host/integration/peer management with confirmation gates |
 
 ---
 
@@ -391,6 +392,22 @@
 
 ---
 
+## Phase 7: LLM Management Agent
+
+**Goal:** Turn the read-only LLM chat into a full homelab agent with access to all platform functions, able to manage connected systems across the mesh.
+
+- [x] `internal/mesh/client.go` -- PeerClient: routes management calls to the owning node (loopback for local, peer address + mTLS client cert for remote); generic `PostJSON` for future actions
+- [x] `internal/hub/llm/tools.go` -- ToolExecutor expanded 5 -> 19 tools: 9 read (hosts/metrics/services/containers/peers/integrations/settings) + 10 management (docker_control, trigger_network_scan, send_notification, update_settings, rename_host, set_device_type, delete_host, manage_integration, check_vendors, add_peer)
+- [x] Container resolution by name/image/ID with cross-host ambiguity detection
+- [x] Confirmation gates enforced executor-side for stop/restart/delete actions (model-independent)
+- [x] `chat.go` -- agent system prompt with safety rules, tool rounds 5 -> 8, per-response action log
+- [x] `api/handleDockerControl` refactored onto PeerClient (also fixes remote control on mTLS meshes, which previously used plain HTTP)
+- [x] Chat UI: "AI Agent" panel, action badges under assistant messages, management suggestion buttons
+- [x] Unit tests: confirm gating, routing, settings persistence, host CRUD, notification sender checks, tool dispatch completeness (`TestAllToolDefinitionsExecutable`)
+- [x] DESIGN.md/README updated with the full tool catalogue
+
+---
+
 ## Decision Log
 
 | Date | Decision | Rationale |
@@ -432,6 +449,10 @@
 | 2026-03-05 | HA token stored as "password" in secrets | Unified credential handling -- all integrations use same SetSecret/GetSecret pattern |
 | 2026-03-05 | Token-based web auth (not basic auth) | Random hex token in file, HMAC-signed cookies, no username/password to manage |
 | 2026-03-05 | Mesh routes exempt from auth | Peers need /api/v1/heartbeat and /api/v1/register without browser sessions |
+| 2026-08-24 | PeerClient for routed management | One place resolves local-vs-peer targets; docker control gains mTLS support and is reusable by both UI and LLM agent |
+| 2026-08-24 | Confirmation gates enforced in executor | The model is instructed to ask first, but the executor refuses stop/restart/delete without confirm=true regardless of what the model attempts |
+| 2026-08-24 | 19 structured tools (still no raw SQL) | Agent covers the full platform surface; destructive ops gated; credentials never enter chat history (integration passwords only via Settings UI) |
+| 2026-08-24 | Action log in chat responses | Users see which tools the agent executed as badges; also written to zerolog |
 
 ---
 

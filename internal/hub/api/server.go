@@ -10,6 +10,7 @@ import (
 
 	"github.com/dx111ge/homelabmon/internal/agent"
 	"github.com/dx111ge/homelabmon/internal/hub/llm"
+	"github.com/dx111ge/homelabmon/internal/mesh"
 	"github.com/dx111ge/homelabmon/internal/models"
 	"github.com/dx111ge/homelabmon/internal/notify"
 	"github.com/dx111ge/homelabmon/internal/store"
@@ -25,6 +26,7 @@ type UIServer struct {
 	auth         *AuthManager
 	scanEnabled  bool
 	ScanFunc     func() (int, error) // triggers a network scan, returns device count
+	PeerClient   *mesh.PeerClient    // routes management calls to the owning mesh node
 	chatHandler  *llm.ChatHandler
 	llmClient    *llm.Client
 	dashTmpl     *template.Template
@@ -59,9 +61,9 @@ func NewUIServer(s *store.Store, collector *agent.Collector, identity *models.No
 			}
 			return t.Format("2006-01-02 15:04")
 		},
-		"printf":       fmt.Sprintf,
-		"svcIcon":      models.ServiceCategoryIcon,
-		"deviceIcon":   deviceTypeIcon,
+		"printf":     fmt.Sprintf,
+		"svcIcon":    models.ServiceCategoryIcon,
+		"deviceIcon": deviceTypeIcon,
 		"hostLabel": func(h models.Host) string {
 			return h.Label()
 		},
