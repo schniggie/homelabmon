@@ -128,6 +128,8 @@ Nodes communicate over HTTP JSON API on port 9600:
 | `/api/v1/hosts` | GET | All known hosts |
 | `/api/v1/metrics/latest` | GET | Latest snapshot |
 | `/api/v1/metrics/history` | GET | Time-series data |
+| `/api/v1/exec` | POST | Run a command on this node (only with `--exec`) |
+| `/api/v1/docker/control` | POST | Start/stop/restart a container |
 
 Heartbeat every 60s. Bidirectional -- response includes peer's own heartbeat. Failed heartbeats mark peer offline.
 
@@ -154,17 +156,26 @@ get_settings()                         -> thresholds, retention, scan interval, 
 
 Management tools:
 ```
-docker_control(container, hostname?, action, confirm?) -> start/stop/restart containers on any node
-trigger_network_scan()                                 -> run ARP+mDNS scan now, returns device count
-send_notification(title, message, severity?)           -> push via ntfy/webhook
-update_settings(...)                                   -> thresholds, retention, scan interval, URLs, site
-rename_host(hostname, new_name)                        -> set display name
-set_device_type(hostname, device_type)                 -> fix classification
-delete_host(hostname, confirm)                         -> remove from CMDB
-manage_integration(action, name, confirm?)             -> test / sync / delete integrations
-check_vendors()                                        -> re-resolve MAC OUI vendors
-add_peer(address)                                      -> connect a new node to the mesh
+run_command(command, hostname?, shell?, timeout_seconds?, confirm) -> run on any agent node: Linux/macOS/BSD via sh, Windows via cmd/powershell; audit-trailed
+list_exec_history(hostname?, limit?)                       -> recent command executions
+docker_control(container, hostname?, action, confirm?)     -> start/stop/restart containers on any node
+trigger_network_scan()                                     -> run ARP+mDNS scan now, returns device count
+send_notification(title, message, severity?)               -> push via ntfy/webhook
+update_settings(...)                                       -> thresholds, retention, scan interval, URLs, site
+rename_host(hostname, new_name)                            -> set display name
+set_device_type(hostname, device_type)                     -> fix classification
+delete_host(hostname, confirm)                             -> remove from CMDB
+manage_integration(action, name, confirm?)                 -> test / sync / delete integrations
+check_vendors()                                            -> re-resolve MAC OUI vendors
+add_peer(address)                                          -> connect a new node to the mesh
 ```
+
+Remote execution (`--exec` per node, off by default): commands run in the node's
+native shell (`sh` on Unix incl. FreeBSD/OPNsense, `cmd.exe`/PowerShell on
+Windows), in their own process group so timeouts kill the whole tree; output is
+capped at 32 KB per stream, timeouts up to 600 s. Every execution is recorded
+in `exec_history` on the requesting node. The tool requires `confirm=true` for
+every single command.
 
 Safety: disruptive actions (stop/restart container, delete host, delete integration)
 carry a `confirm` parameter. The system prompt instructs the model to ask the user
@@ -173,7 +184,7 @@ the gate independently of the model. Executed actions are shown as badges in the
 chat UI and logged.
 
 Chat UI in the sidebar with suggestion buttons, session history, and an action
-trail. Tool-calling loop (max 8 rounds) handles multi-step queries automatically.
+trail. Tool-calling loop (max 32 rounds) handles multi-step and fleet-wide workflows automatically.
 
 Users chat naturally: "What's running on the NAS?", "Any disk issues?", "Show me
 all Docker containers", "Restart jellyfin on the NAS", "Scan the network now".

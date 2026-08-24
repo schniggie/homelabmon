@@ -59,6 +59,7 @@ func init() {
 	rootCmd.PersistentFlags().String("bind", ":9600", "bind address for API and UI")
 	rootCmd.PersistentFlags().Int("collect-interval", 30, "metric collection interval in seconds")
 	rootCmd.PersistentFlags().Bool("scan", false, "enable network scanning")
+	rootCmd.PersistentFlags().Bool("exec", false, "enable remote command execution on this node (required on every node that should accept commands)")
 	rootCmd.PersistentFlags().Int("scan-interval", 300, "network scan interval in seconds (default 5 min)")
 	rootCmd.PersistentFlags().String("notify-ntfy", "", "ntfy.sh topic URL (e.g., https://ntfy.sh/homelabmon-alerts)")
 	rootCmd.PersistentFlags().String("notify-webhook", "", "webhook URL for notifications (Discord, Slack, custom)")
@@ -80,6 +81,7 @@ func init() {
 	viper.BindPFlag("bind", rootCmd.PersistentFlags().Lookup("bind"))
 	viper.BindPFlag("collect-interval", rootCmd.PersistentFlags().Lookup("collect-interval"))
 	viper.BindPFlag("scan", rootCmd.PersistentFlags().Lookup("scan"))
+	viper.BindPFlag("exec", rootCmd.PersistentFlags().Lookup("exec"))
 	viper.BindPFlag("scan-interval", rootCmd.PersistentFlags().Lookup("scan-interval"))
 	viper.BindPFlag("notify-ntfy", rootCmd.PersistentFlags().Lookup("notify-ntfy"))
 	viper.BindPFlag("notify-webhook", rootCmd.PersistentFlags().Lookup("notify-webhook"))
@@ -226,6 +228,7 @@ func runAgent(cmd *cobra.Command, args []string) error {
 	var llmClient *llm.Client
 	executor := llm.NewToolExecutor(st, identity)
 	executor.SetDockerRouter(peerClient)
+	executor.SetExecRouter(peerClient)
 	executor.SetNotifier(dispatcher)
 	if llmURL := viper.GetString("llm"); llmURL != "" {
 		llmModel := viper.GetString("llm-model")
@@ -253,6 +256,10 @@ func runAgent(cmd *cobra.Command, args []string) error {
 	transport.SetScanCoordinator(scanCoord)
 	if dockerObs != nil {
 		transport.SetDocker(dockerObs)
+	}
+	if viper.GetBool("exec") {
+		transport.SetExecEnabled(true)
+		log.Warn().Msg("remote command execution ENABLED (--exec): anyone who can reach this port can run commands on this node -- use mTLS on untrusted networks")
 	}
 
 	pki := mesh.NewPKI(dir)

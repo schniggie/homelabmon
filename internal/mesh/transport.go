@@ -28,6 +28,7 @@ type Transport struct {
 	pki             *PKI
 	docker          DockerController
 	scanCoordinator *agent.ScanCoordinator
+	execEnabled     bool
 }
 
 // SetScanCoordinator sets the scan coordinator for heartbeat scan-time exchange.

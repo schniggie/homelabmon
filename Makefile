@@ -11,7 +11,7 @@ LDFLAGS := -s -w \
 build:
 	go build -ldflags "$(LDFLAGS)" -o homelabmon .
 
-all: linux-amd64 linux-arm64 linux-arm darwin-amd64 darwin-arm64 windows-amd64
+all: linux-amd64 linux-arm64 linux-arm darwin-amd64 darwin-arm64 windows-amd64 freebsd-amd64 freebsd-arm64
 
 linux-amd64:
 	GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/homelabmon-linux-amd64 .
@@ -30,6 +30,12 @@ darwin-arm64:
 
 windows-amd64:
 	GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/homelabmon-windows-amd64.exe .
+
+freebsd-amd64:
+	GOOS=freebsd GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/homelabmon-freebsd-amd64 .
+
+freebsd-arm64:
+	GOOS=freebsd GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/homelabmon-freebsd-arm64 .
 
 clean:
 	rm -rf dist/ homelabmon homelabmon.exe

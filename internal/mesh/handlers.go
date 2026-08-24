@@ -24,6 +24,7 @@ func (t *Transport) setupRoutes() {
 	t.mux.HandleFunc("GET /api/v1/services/{host_id}", t.handleHostServices)
 	t.mux.HandleFunc("POST /api/v1/enroll", t.handleEnroll)
 	t.mux.HandleFunc("POST /api/v1/docker/control", t.handleDockerControl)
+	t.mux.HandleFunc("POST /api/v1/exec", t.handleExec)
 }
 
 type registerRequest struct {

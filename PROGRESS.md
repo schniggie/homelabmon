@@ -12,6 +12,7 @@
 | 5 | Integrations | `COMPLETE` | FRITZ!Box, Unifi, HA, Pi-hole, pfSense, SNMP scanner, external plugins |
 | 6 | Security & Polish | `COMPLETE` | mTLS, enrollment, auth, install scripts, systemd/launchd/Windows service, config hot-reload, peer federation |
 | 7 | LLM Management Agent | `COMPLETE` | Full platform tool access for the chat agent: docker control across the mesh, scans, notifications, settings, host/integration/peer management with confirmation gates |
+| 8 | Remote Commands | `COMPLETE` | Devops-grade remote execution on Linux/Windows/macOS/FreeBSD nodes: --exec opt-in, per-command confirmation, process-group timeouts, audit trail, OPNsense support |
 
 ---
 
@@ -408,6 +409,24 @@
 
 ---
 
+## Phase 8: Remote Commands
+
+**Goal:** Run shell commands on all connected nodes (Linux, Windows, macOS, FreeBSD/OPNsense) from the AI agent -- "upgrade system xyz", general devops work.
+
+- [x] `internal/mesh/exec.go` -- `/api/v1/exec` endpoint: native shell per OS (`sh` on Unix incl. FreeBSD, `cmd.exe`/`powershell` on Windows), timeouts (default 120s, max 600s), 32KB output cap per stream
+- [x] Process-group execution on Unix (`exec_unix.go`): timeout kills the whole tree -- killing only the shell orphans children which hold the pipes open (bug caught by tests)
+- [x] `WaitDelay` safety net so Run() can never hang on surviving grandchildren
+- [x] Off by default: `--exec` flag required per node, startup warning recommends mTLS on untrusted networks
+- [x] `PeerClient.Exec` routes commands local-loopback or to the owning peer (mTLS)
+- [x] Migration 009 + `store/exec.go`: exec_history audit table on the requesting node
+- [x] `run_command` tool: confirmation required for EVERY command, passive devices refused, LLM output truncated (full output in history); `list_exec_history` tool
+- [x] Agent loop raised 8 -> 32 rounds for fleet-wide workflows; system prompt updated with fleet-upgrade playbook
+- [x] FreeBSD build targets (amd64 + arm64) added and verified; OPNsense install notes
+- [x] Tests: shell matrix per OS, exit codes, timeout, output cap; tool gating + routing + history
+- [x] Live smoke: disabled by default (503), echo/stderr/exit-code verified, 3s timeout honored exactly
+
+---
+
 ## Decision Log
 
 | Date | Decision | Rationale |
@@ -453,6 +472,11 @@
 | 2026-08-24 | Confirmation gates enforced in executor | The model is instructed to ask first, but the executor refuses stop/restart/delete without confirm=true regardless of what the model attempts |
 | 2026-08-24 | 19 structured tools (still no raw SQL) | Agent covers the full platform surface; destructive ops gated; credentials never enter chat history (integration passwords only via Settings UI) |
 | 2026-08-24 | Action log in chat responses | Users see which tools the agent executed as badges; also written to zerolog |
+| 2026-08-24 | --exec opt-in per node | Command execution is a security step change; nodes stay monitoring-only unless explicitly enabled |
+| 2026-08-24 | Confirm gate on every command | Unlike docker_control (start is safe), no shell command is "safe by default"; the agent must get approval for the exact command each time |
+| 2026-08-24 | Process groups on Unix + WaitDelay | Killing the shell alone orphans children that hold stdout/stderr open; tests caught Run() blocking 30s+ past timeout |
+| 2026-08-24 | exec_history table on requesting node | Auditable trail of agent-driven changes, queryable by the agent itself (list_exec_history) |
+| 2026-08-24 | FreeBSD targets (amd64/arm64) | OPNsense firewall support; pure-Go stack (modernc sqlite) cross-compiles cleanly |
 
 ---
 

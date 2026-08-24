@@ -10,6 +10,7 @@ import (
 
 	"github.com/dx111ge/homelabmon/internal/agent/integrations"
 	"github.com/dx111ge/homelabmon/internal/agent/scanners"
+	"github.com/dx111ge/homelabmon/internal/mesh"
 	"github.com/dx111ge/homelabmon/internal/models"
 	"github.com/dx111ge/homelabmon/internal/notify"
 	"github.com/dx111ge/homelabmon/internal/plugin"
@@ -22,6 +23,11 @@ type DockerRouter interface {
 	DockerControl(ctx context.Context, hostID, containerID, action string) error
 }
 
+// ExecRouter runs commands on nodes (implemented by mesh.PeerClient).
+type ExecRouter interface {
+	Exec(ctx context.Context, hostID, command, shell string, timeoutSec int) (*mesh.ExecResult, error)
+}
+
 // Notifier dispatches notifications (implemented by notify.Dispatcher).
 type Notifier interface {
 	Send(n notify.Notification)
@@ -32,11 +38,12 @@ type Notifier interface {
 // ToolExecutor executes tool calls against the platform: CMDB queries,
 // settings, notifications, scans, and management actions on any mesh node.
 type ToolExecutor struct {
-	store    *store.Store
-	identity *models.NodeIdentity
-	docker   DockerRouter
-	scanFunc func() (int, error)
-	notifier Notifier
+	store      *store.Store
+	identity   *models.NodeIdentity
+	docker     DockerRouter
+	execRouter ExecRouter
+	scanFunc   func() (int, error)
+	notifier   Notifier
 }
 
 func NewToolExecutor(s *store.Store, identity *models.NodeIdentity) *ToolExecutor {
@@ -45,6 +52,9 @@ func NewToolExecutor(s *store.Store, identity *models.NodeIdentity) *ToolExecuto
 
 // SetDockerRouter enables container management (local + remote via mesh).
 func (e *ToolExecutor) SetDockerRouter(r DockerRouter) { e.docker = r }
+
+// SetExecRouter enables remote command execution across the mesh.
+func (e *ToolExecutor) SetExecRouter(r ExecRouter) { e.execRouter = r }
 
 // SetScanFunc enables on-demand network scans.
 func (e *ToolExecutor) SetScanFunc(f func() (int, error)) { e.scanFunc = f }
@@ -214,6 +224,22 @@ func ToolDefinitions() []Tool {
 				Parameters:  json.RawMessage(`{"type":"object","properties":{"address":{"type":"string","description":"Peer address as host:port (e.g. 192.168.1.50:9600)"}},"required":["address"]}`),
 			},
 		},
+		{
+			Type: "function",
+			Function: ToolFunction{
+				Name:        "run_command",
+				Description: "Run a shell command on any agent node in the mesh (Linux, Windows, macOS, FreeBSD/OPNsense) and get stdout, stderr, and the exit code. Linux/macOS/BSD run /bin/sh; Windows runs cmd.exe (shell=\"powershell\" for PowerShell). Requires explicit user confirmation for EVERY command: show the exact command and target host first. Use for devops tasks: package upgrades, service checks, logs, config inspection.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"The shell command to run"},"hostname":{"type":"string","description":"Target host (optional, defaults to the local node). For fleet-wide tasks, call this once per host."},"shell":{"type":"string","description":"Windows only: cmd (default) or powershell","enum":["cmd","powershell"]},"timeout_seconds":{"type":"integer","description":"Timeout in seconds (default 120, max 600; use higher for upgrades)"},"confirm":{"type":"boolean","description":"Must be true, and only after the user explicitly approved the exact command"}},"required":["command","confirm"]}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: ToolFunction{
+				Name:        "list_exec_history",
+				Description: "Show recent remote command executions: command, host, exit code, duration, time. Useful to review what was already done (e.g. during an upgrade session).",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"hostname":{"type":"string","description":"Filter by host (optional)"},"limit":{"type":"integer","description":"Number of entries (default 20, max 200)"}}}`),
+			},
+		},
 	}
 }
 
@@ -260,6 +286,10 @@ func (e *ToolExecutor) Execute(ctx context.Context, name string, args json.RawMe
 		return e.checkVendors(ctx)
 	case "add_peer":
 		return e.addPeer(ctx, args)
+	case "run_command":
+		return e.runCommand(ctx, args)
+	case "list_exec_history":
+		return e.listExecHistory(ctx, args)
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
@@ -1173,6 +1203,129 @@ func (e *ToolExecutor) addPeer(ctx context.Context, args json.RawMessage) (strin
 		"peer": addr,
 		"note": "peer added; it will be contacted on the next heartbeat (within ~60s) and exchange peers via gossip",
 	})), nil
+}
+
+// runCommand executes a shell command on a mesh node. Every command requires
+// explicit confirmation; results are recorded in the exec history.
+func (e *ToolExecutor) runCommand(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Command    string `json:"command"`
+		Hostname   string `json:"hostname"`
+		Shell      string `json:"shell"`
+		TimeoutSec int    `json:"timeout_seconds"`
+		Confirm    bool   `json:"confirm"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", err
+	}
+
+	if !params.Confirm {
+		return fmt.Sprintf(`{"error":"confirmation required",%s}`, confirmHint), nil
+	}
+	if e.execRouter == nil {
+		return `{"error":"remote command execution is not available on this node"}`, nil
+	}
+
+	hostID := ""
+	hostLabel := e.identity.Hostname
+	hostOS := ""
+	if params.Hostname != "" {
+		h := e.findHost(ctx, params.Hostname)
+		if h == nil {
+			return fmt.Sprintf(`{"error":"host %q not found"}`, params.Hostname), nil
+		}
+		if h.MonitorType != "agent" {
+			return fmt.Sprintf(`{"error":"host %q is a passive device (%s); commands can only run on agent nodes"}`, params.Hostname, h.MonitorType), nil
+		}
+		hostID = h.ID
+		hostLabel = h.Label()
+		hostOS = h.OS
+	}
+
+	if params.TimeoutSec <= 0 {
+		params.TimeoutSec = 120
+	}
+	if params.TimeoutSec > 600 {
+		params.TimeoutSec = 600
+	}
+	if params.Shell == "" {
+		params.Shell = "cmd"
+	}
+
+	res, err := e.execRouter.Exec(ctx, hostID, params.Command, params.Shell, params.TimeoutSec)
+	if err != nil {
+		return fmt.Sprintf(`{"error":"%s"}`, err.Error()), nil
+	}
+
+	// Audit trail on the requesting node
+	e.store.InsertExecRecord(ctx, &store.ExecRecord{
+		HostID:     res.HostID,
+		Hostname:   hostLabel,
+		OS:         res.OS,
+		Command:    params.Command,
+		Stdout:     res.Stdout,
+		Stderr:     res.Stderr,
+		ExitCode:   res.ExitCode,
+		TimedOut:   res.TimedOut,
+		DurationMs: res.DurationMs,
+		ExecutedAt: time.Now().UTC(),
+	})
+
+	// Keep the LLM context small; full output lives in exec_history
+	result := *res
+	result.Stdout = truncate(result.Stdout, 4000)
+	result.Stderr = truncate(result.Stderr, 2000)
+	result.Command = params.Command
+	if hostOS != "" && result.OS == "" {
+		result.OS = hostOS
+	}
+	return string(mustJSON(result)), nil
+}
+
+func (e *ToolExecutor) listExecHistory(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Hostname string `json:"hostname"`
+		Limit    int    `json:"limit"`
+	}
+	json.Unmarshal(args, &params)
+
+	hostID := ""
+	if params.Hostname != "" {
+		h := e.findHost(ctx, params.Hostname)
+		if h == nil {
+			return fmt.Sprintf(`{"error":"host %q not found"}`, params.Hostname), nil
+		}
+		hostID = h.ID
+	}
+
+	records, err := e.store.ListExecHistory(ctx, hostID, params.Limit)
+	if err != nil {
+		return "", err
+	}
+	type histEntry struct {
+		Host       string `json:"host"`
+		OS         string `json:"os,omitempty"`
+		Command    string `json:"command"`
+		ExitCode   int    `json:"exit_code"`
+		TimedOut   bool   `json:"timed_out,omitempty"`
+		DurationMs int64  `json:"duration_ms"`
+		ExecutedAt string `json:"executed_at"`
+		Stderr     string `json:"stderr,omitempty"`
+	}
+	var out []histEntry
+	for _, r := range records {
+		out = append(out, histEntry{
+			Host:       r.Hostname,
+			OS:         r.OS,
+			Command:    truncate(r.Command, 200),
+			ExitCode:   r.ExitCode,
+			TimedOut:   r.TimedOut,
+			DurationMs: r.DurationMs,
+			ExecutedAt: r.ExecutedAt.Format("2006-01-02 15:04:05"),
+			Stderr:     truncate(r.Stderr, 200),
+		})
+	}
+	return string(mustJSON(out)), nil
 }
 
 // ---------- helpers ----------

@@ -18,7 +18,8 @@ A single-binary, zero-dependency homelab discovery and monitoring system with me
 - **Network scanning** -- ARP, mDNS, SNMP discover passive devices (phones, TVs, IoT, printers)
 - **Integrations** -- FRITZ!Box, Unifi, Home Assistant, Pi-hole, pfSense API pulls
 - **LLM chat** -- local Ollama integration: "What's running on my NAS?"
-- **AI agent** -- the chat can also *manage* the homelab: start/stop/restart Docker containers on any node, trigger scans, send notifications, change settings, rename/remove devices, test/sync integrations, and add mesh peers (with confirmation gates on destructive actions)
+- **AI agent** -- the chat can also *manage* the homelab: start/stop/restart Docker containers on any node, run shell commands on Linux/Windows/macOS/FreeBSD nodes, trigger scans, send notifications, change settings, rename/remove devices, test/sync integrations, and add mesh peers (with confirmation gates on every action)
+- **Remote commands** -- run devops commands on any node (package upgrades, service checks, logs) over the mesh; opt-in per node with `--exec`, full audit trail
 - **Lightweight CMDB** -- all devices in one SQLite database
 - **Notifications** -- ntfy.sh + webhook alerts for host offline / resource thresholds
 - **Secure credentials** -- AES-256-GCM encrypted secret store, no passwords in CLI or env
@@ -196,6 +197,33 @@ To disable auth on a trusted network:
 homelabmon --ui --no-auth
 ```
 
+## Remote Command Execution
+
+The AI agent (and any node in the mesh) can run shell commands on any node started with `--exec`:
+
+- **Linux / macOS / FreeBSD (OPNsense)**: commands run via `/bin/sh`
+- **Windows**: commands run via `cmd.exe`, or PowerShell with `shell: "powershell"`
+- Commands time out after a configurable limit (default 120s, max 600s); output is capped at 32 KB per stream
+- Every executed command is recorded in the exec history (`list_exec_history` tool) and logged
+
+```bash
+homelabmon --ui --exec          # this node accepts remote commands
+```
+
+**Security**: remote execution is **off by default** and must be enabled per node. The AI agent must get your explicit confirmation for every command before executing it. On untrusted networks, enable mTLS (see below) so the exec endpoint is only reachable by enrolled nodes -- without mTLS, anyone who can reach port 9600 can run commands on a `--exec` node.
+
+## FreeBSD / OPNsense
+
+FreeBSD builds are provided for firewalls and BSD-based NAS (OPNsense, pfSense-based systems):
+
+```bash
+curl -sL https://github.com/dx111ge/homelabmon/releases/latest/download/homelabmon-freebsd-amd64 -o homelabmon
+chmod +x homelabmon
+./homelabmon --ui --exec
+```
+
+On OPNsense, copy the binary to e.g. `/usr/local/bin/` and run it as root (or a user with the needed privileges) so package and service commands work. Note that OPNsense system updates may wipe non-standard binaries -- reinstall after major upgrades.
+
 ## Mesh Security (mTLS)
 
 For encrypted and authenticated peer-to-peer communication:
@@ -249,6 +277,7 @@ homelabmon                                    # bare node: observe + mesh
 homelabmon --ui                               # + web dashboard on :9600
 homelabmon --ui --no-auth                     # + dashboard without login
 homelabmon --scan                             # + network scanning (ARP, mDNS)
+homelabmon --exec                             # + accept remote commands (agent + AI)
 homelabmon --llm http://localhost:11434       # + LLM chat (Ollama)
 homelabmon --peer 192.168.1.10:9600          # + connect to another node
 homelabmon --notify-ntfy https://ntfy.sh/x   # + push notifications
@@ -304,7 +333,7 @@ See [PLUGINS.md](PLUGINS.md) for the plugin development guide, including externa
 ## Cross-Platform Builds
 
 ```bash
-make all    # builds for linux/amd64, linux/arm64, linux/arm, darwin/amd64, darwin/arm64, windows/amd64
+make all    # builds for linux/amd64, linux/arm64, linux/arm, darwin/amd64, darwin/arm64, windows/amd64, freebsd/amd64, freebsd/arm64
 ```
 
 ## Documentation

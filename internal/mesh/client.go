@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"time"
@@ -65,6 +66,43 @@ func (c *PeerClient) DockerControl(ctx context.Context, hostID, containerID, act
 		return fmt.Errorf("node returned status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// Exec runs a command on the given host (loopback for the local node, the
+// peer's address otherwise) and returns its result.
+func (c *PeerClient) Exec(ctx context.Context, hostID, command, shell string, timeoutSec int) (*ExecResult, error) {
+	url, err := c.nodeURL(hostID, "/api/v1/exec")
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.post(ctx, url, map[string]interface{}{
+		"command":         command,
+		"shell":           shell,
+		"timeout_seconds": timeoutSec,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	var result ExecResult
+	json.Unmarshal(body, &result)
+	if resp.StatusCode >= 400 {
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		json.Unmarshal(body, &errBody)
+		msg := errBody.Error
+		if msg == "" {
+			msg = fmt.Sprintf("node returned status %d", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("%s", msg)
+	}
+	return &result, nil
 }
 
 // PostJSON sends a JSON POST to the node owning hostID and decodes the

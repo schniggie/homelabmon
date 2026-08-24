@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dx111ge/homelabmon/internal/mesh"
 	"github.com/dx111ge/homelabmon/internal/models"
 	"github.com/dx111ge/homelabmon/internal/notify"
 	"github.com/dx111ge/homelabmon/internal/store"
@@ -289,5 +290,83 @@ func TestAllToolDefinitionsExecutable(t *testing.T) {
 		if err != nil && strings.Contains(err.Error(), "unknown tool") {
 			t.Errorf("tool %q has no executor", name)
 		}
+	}
+}
+
+type fakeExecRouter struct {
+	calls []string // "hostID|command|shell"
+	res   *mesh.ExecResult
+	err   error
+}
+
+func (f *fakeExecRouter) Exec(ctx context.Context, hostID, command, shell string, timeoutSec int) (*mesh.ExecResult, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	f.calls = append(f.calls, hostID+"|"+command+"|"+shell)
+	return f.res, nil
+}
+
+func TestRunCommandConfirmGatingAndHistory(t *testing.T) {
+	e, st := newTestExecutor(t)
+	seedHost(t, st, models.Host{ID: "node-a", Hostname: "alpha", MonitorType: "agent", Status: "online", OS: "ubuntu"})
+	seedHost(t, st, models.Host{ID: "node-b", Hostname: "beta", MonitorType: "agent", Status: "online", OS: "freebsd"})
+	seedHost(t, st, models.Host{ID: "dev-1", Hostname: "tv", MonitorType: "passive"})
+
+	fake := &fakeExecRouter{res: &mesh.ExecResult{
+		HostID: "node-b", OS: "freebsd", Stdout: "ok", ExitCode: 0, DurationMs: 12,
+	}}
+	e.SetExecRouter(fake)
+
+	// every command requires confirmation, even harmless ones
+	res, err := e.Execute(context.Background(), "run_command", json.RawMessage(`{"command":"uptime"}`))
+	if err != nil {
+		t.Fatalf("run_command: %v", err)
+	}
+	if !strings.Contains(res, "confirmation required") {
+		t.Errorf("expected confirmation gate, got: %s", res)
+	}
+	if len(fake.calls) != 0 {
+		t.Errorf("router must not be called without confirmation: %v", fake.calls)
+	}
+
+	// passive devices refuse execution
+	res, _ = e.Execute(context.Background(), "run_command",
+		json.RawMessage(`{"command":"uptime","hostname":"tv","confirm":true}`))
+	if !strings.Contains(res, "passive device") {
+		t.Errorf("expected passive-device refusal, got: %s", res)
+	}
+
+	// confirmed command routes to the right host and records history
+	res, _ = e.Execute(context.Background(), "run_command",
+		json.RawMessage(`{"command":"pkg upgrade -n","hostname":"beta","timeout_seconds":300,"confirm":true}`))
+	if !strings.Contains(res, `"stdout":"ok"`) {
+		t.Errorf("expected result, got: %s", res)
+	}
+	if len(fake.calls) != 1 || fake.calls[0] != "node-b|pkg upgrade -n|cmd" {
+		t.Errorf("wrong routing: %v", fake.calls)
+	}
+
+	hist, err := st.ListExecHistory(context.Background(), "node-b", 10)
+	if err != nil || len(hist) != 1 {
+		t.Fatalf("expected 1 history record, got %d err %v", len(hist), err)
+	}
+	if hist[0].Command != "pkg upgrade -n" || hist[0].OS != "freebsd" || hist[0].Hostname != "beta" {
+		t.Errorf("history record wrong: %+v", hist[0])
+	}
+
+	// history tool reflects the record
+	res, _ = e.Execute(context.Background(), "list_exec_history", json.RawMessage(`{"hostname":"beta"}`))
+	if !strings.Contains(res, "pkg upgrade -n") {
+		t.Errorf("history tool missing record: %s", res)
+	}
+}
+
+func TestRunCommandUnavailable(t *testing.T) {
+	e, _ := newTestExecutor(t)
+	res, _ := e.Execute(context.Background(), "run_command",
+		json.RawMessage(`{"command":"uptime","confirm":true}`))
+	if !strings.Contains(res, "not available") {
+		t.Errorf("expected unavailable error without router, got: %s", res)
 	}
 }

@@ -16,6 +16,7 @@ Reading the environment:
 - Hosts, devices, metrics, services, Docker containers, mesh peers, integrations, settings
 
 Managing the homelab:
+- Run shell commands on any agent node -- Linux, macOS, Windows, FreeBSD/OPNsense (run_command). This enables full devops work: package upgrades, service restarts, log inspection, config changes.
 - Start, stop, or restart Docker containers on ANY node in the mesh (docker_control)
 - Trigger network scans to discover new devices (trigger_network_scan)
 - Send push notifications (send_notification)
@@ -23,10 +24,13 @@ Managing the homelab:
 - Rename hosts, fix device classifications, remove stale entries (rename_host, set_device_type, delete_host)
 - Test, sync, or remove external integrations like FRITZ!Box, Unifi, Home Assistant, Pi-hole, pfSense (manage_integration)
 - Connect new nodes to the mesh (add_peer)
+- Review what commands were already run (list_exec_history)
 
 Safety rules -- follow them strictly:
-- Disruptive actions (stop/restart container, delete host, delete integration) require EXPLICIT user confirmation. Ask first ("Restart nginx on the NAS, sure?"). Only call the tool with confirm=true after the user agreed in this conversation.
+- run_command requires confirmation for EVERY command, no matter how harmless it looks. State the exact command and the target host, then wait for the user's approval. Only call with confirm=true after the user agreed to that exact command.
+- Disruptive actions (stop/restart container, delete host, delete integration) likewise require explicit user confirmation.
 - Never call a destructive tool with confirm=true preemptively or "just in case".
+- For fleet-wide operations (e.g. "upgrade everything"), propose the plan with the exact commands per host and get approval once, then execute host by host. If any host fails, stop and report before continuing.
 - When resolving containers or hosts, use the read tools first to get exact names.
 
 Working style:
@@ -39,7 +43,9 @@ Working style:
 - If the user asks for something beyond your tools, say what you can do instead`
 
 // maxToolRounds limits tool-calling loops to prevent infinite cycles.
-const maxToolRounds = 8
+// Set high enough for fleet-wide devops workflows (e.g. one command per host
+// across a dozen hosts, with reads in between).
+const maxToolRounds = 32
 
 // Action records a tool invocation for display in the chat UI.
 type Action struct {
