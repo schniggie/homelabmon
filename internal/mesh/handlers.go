@@ -83,9 +83,9 @@ func (t *Transport) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		t.store.InsertMetric(r.Context(), hb.Metric)
 	}
 
-	// Store peer's services
-	for i := range hb.Services {
-		t.store.UpsertService(r.Context(), &hb.Services[i])
+	// Store peer's services (single transaction: one fsync, not N)
+	if len(hb.Services) > 0 {
+		t.store.UpsertServices(r.Context(), hb.Services)
 	}
 
 	// Update peer record — use the sender's announced listening address,

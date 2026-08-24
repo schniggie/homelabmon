@@ -37,8 +37,10 @@ func NewHeartbeatService(identity *models.NodeIdentity, collector *Collector, s 
 		identity:  identity,
 		collector: collector,
 		store:     s,
-		client:    &http.Client{Timeout: 10 * time.Second},
-		interval:  DefaultHeartbeatInterval,
+		// Generous timeout: peers on slow storage (e.g. container fsync
+		// latency) can take seconds to persist a full heartbeat.
+		client:   &http.Client{Timeout: 30 * time.Second},
+		interval: DefaultHeartbeatInterval,
 	}
 }
 
@@ -178,8 +180,8 @@ func (h *HeartbeatService) sendToPeer(ctx context.Context, peer models.PeerInfo,
 	if peerHB.Metric != nil {
 		h.store.InsertMetric(ctx, peerHB.Metric)
 	}
-	for _, svc := range peerHB.Services {
-		h.store.UpsertService(ctx, &svc)
+	if len(peerHB.Services) > 0 {
+		h.store.UpsertServices(ctx, peerHB.Services)
 	}
 
 	// Update peer status

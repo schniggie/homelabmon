@@ -29,6 +29,47 @@ func (s *Store) UpsertService(ctx context.Context, svc *models.DiscoveredService
 	return err
 }
 
+// UpsertServices inserts or updates many discovered services in a single
+// transaction. Heartbeats carry a node's full service list; writing them
+// one-by-one costs one fsync each, which is ~300ms on slow container
+// storage -- dozens of services then exceed the peer's heartbeat timeout.
+func (s *Store) UpsertServices(ctx context.Context, services []models.DiscoveredService) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO services (host_id, name, port, protocol, process, category, source, container_id, container_image, stack, health, status, first_seen, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+		ON CONFLICT(host_id, port, protocol) DO UPDATE SET
+			name = excluded.name,
+			process = excluded.process,
+			category = excluded.category,
+			source = excluded.source,
+			container_id = excluded.container_id,
+			container_image = excluded.container_image,
+			stack = excluded.stack,
+			health = excluded.health,
+			status = excluded.status,
+			last_seen = datetime('now')
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for i := range services {
+		svc := &services[i]
+		if _, err := stmt.ExecContext(ctx, svc.HostID, svc.Name, svc.Port, svc.Protocol, svc.Process,
+			svc.Category, svc.Source, svc.ContainerID, svc.ContainerImg, svc.Stack, svc.Health, svc.Status); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // ListServicesByHost returns all active services for a host.
 func (s *Store) ListServicesByHost(ctx context.Context, hostID string) ([]models.DiscoveredService, error) {
 	rows, err := s.db.QueryContext(ctx, `
