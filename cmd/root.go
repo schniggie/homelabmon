@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -47,6 +48,7 @@ func initConfig() {
 		viper.SetConfigType("yaml")
 	}
 	viper.SetEnvPrefix("HOMELABMON")
+	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 	viper.AutomaticEnv()
 	viper.ReadInConfig()
 

@@ -1,18 +1,33 @@
 # AUTH: The web UI is protected by a token on first start.
 # Retrieve it with: docker exec homelabmon cat /data/.homelabmon/auth-token
 # To disable auth, add --no-auth to the command.
+#
+# LLM: configured via environment variables below (HOMELABMON_* maps to the
+# CLI flags; dashes become underscores). Point HOMELABMON_LLM at your Ollama.
 services:
   homelabmon:
-    image: ghcr.io/dx111ge/homelabmon:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: homelabmon:local
     container_name: homelabmon
-    # host networking gives access to the LAN for ARP/mDNS scanning.
+    # host networking gives access to the LAN for ARP/mDNS scanning
+    # and to reach Ollama on other machines.
     # If host mode is not available, use bridge mode without --scan
     # and let a bare-metal peer handle network discovery.
     network_mode: host
+    environment:
+      - HOMELABMON_LLM=http://192.168.178.250:11434
+      - HOMELABMON_LLM_MODEL=qwen3.8:27b-mlx
+      # More examples (all flags work as HOMELABMON_<FLAG> with - -> _):
+      # - HOMELABMON_SITE=home
+      # - HOMELABMON_NOTIFY_NTFY=https://ntfy.sh/my-topic
+      # - HOMELABMON_RETENTION_DAYS=30
     volumes:
       - ./data:/data
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /:/hostfs:ro
     # Add --no-auth to disable web UI authentication
+    # Add --exec to allow remote command execution on this node
     command: ["--ui", "--scan", "--bind", ":9600"]
     restart: unless-stopped
