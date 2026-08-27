@@ -48,7 +48,7 @@
                     <div class="text-xs text-gray-400 mb-1" x-show="msg.role !== 'user'">
                         <i class="fa-solid fa-brain mr-1 text-purple-400"></i>HomeMonitor AI
                     </div>
-                    <div class="whitespace-pre-wrap text-sm" x-html="formatMessage(msg.content)"></div>
+                    <div class="text-sm chat-md" x-html="renderMarkdown(msg.content)"></div>
                 </div>
             </div>
         </template>
@@ -161,18 +161,6 @@ function chatApp() {
                 const el = this.$refs.messages;
                 if (el) el.scrollTop = el.scrollHeight;
             });
-        },
-
-        formatMessage(text) {
-            if (!text) return '';
-            // Basic markdown-like formatting
-            return text
-                .replace(/&/g, '&amp;')
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;')
-                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-                .replace(/`(.*?)`/g, '<code class="bg-gray-700 px-1 rounded text-purple-300">$1</code>')
-                .replace(/\n/g, '<br>');
         }
     }
 }

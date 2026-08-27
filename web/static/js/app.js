@@ -161,3 +161,61 @@ function dashSparkline(el, hostId) {
         })
         .catch(() => {});
 }
+
+// ---------- Chat markdown rendering (shared by sidebar panel and full-page chat) ----------
+
+function renderMarkdown(text) {
+    if (!text) return '';
+    // Libraries failed to load (e.g. no internet): fall back to escaped text
+    if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
+        return text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/`([^`]*)`/g, '<code class="bg-gray-700 px-1 rounded text-purple-300">$1</code>')
+            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+            .replace(/\n/g, '<br>');
+    }
+    const tpl = document.createElement('template');
+    tpl.innerHTML = DOMPurify.sanitize(marked.parse(text, { gfm: true, breaks: true }));
+
+    tpl.content.querySelectorAll('a[href]').forEach(a => {
+        a.setAttribute('target', '_blank');
+        a.setAttribute('rel', 'noopener noreferrer');
+    });
+    tpl.content.querySelectorAll('table').forEach(t => {
+        const wrap = document.createElement('div');
+        wrap.className = 'md-table-wrap';
+        t.parentNode.insertBefore(wrap, t);
+        wrap.appendChild(t);
+    });
+    tpl.content.querySelectorAll('pre').forEach(pre => {
+        const wrap = document.createElement('div');
+        wrap.className = 'md-code';
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'md-copy';
+        btn.title = 'Copy code';
+        btn.innerHTML = '<i class="fa-regular fa-copy"></i>';
+        pre.parentNode.insertBefore(wrap, pre);
+        wrap.appendChild(btn);
+        wrap.appendChild(pre);
+    });
+    return tpl.innerHTML;
+}
+
+// Copy buttons live in dynamically rendered messages, so delegate at document level
+document.addEventListener('click', function(e) {
+    const btn = e.target.closest('.md-copy');
+    if (!btn || !navigator.clipboard) return;
+    const code = btn.parentElement.querySelector('pre code');
+    if (!code) return;
+    navigator.clipboard.writeText(code.textContent).then(() => {
+        btn.classList.add('copied');
+        btn.innerHTML = '<i class="fa-solid fa-check"></i>';
+        setTimeout(() => {
+            btn.classList.remove('copied');
+            btn.innerHTML = '<i class="fa-regular fa-copy"></i>';
+        }, 1200);
+    }).catch(() => {});
+});
