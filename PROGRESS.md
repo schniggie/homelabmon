@@ -15,6 +15,7 @@
 | 8 | Remote Commands | `COMPLETE` | Devops-grade remote execution on Linux/Windows/macOS/FreeBSD nodes: --exec opt-in, per-command confirmation, process-group timeouts, audit trail, OPNsense support |
 | 9 | Agent Memory & Chat History | `COMPLETE` | Persistent per-node memory (auto-recorded actions + agent notes), cross-session recall, persisted chat sessions with LLM-generated titles |
 | 10 | Diagnostics & Stability | `COMPLETE` | Debug API with event ring, fixed standalone-node self-host flapping and passive-device offline floods between scans |
+| 11 | Mesh Hardening, Chat UX & Memory Mgmt | `COMPLETE` | Enrollment fix, heartbeat batching, peer removal; rich markdown chat that survives navigation; per-chat auto-approve toggle; per-node memory view with user edit/delete |
 
 ---
 
@@ -464,6 +465,35 @@ Root causes found by probing the live hub (proxmox1, standalone, 27 hosts):
 
 ---
 
+## Phase 11: Mesh Hardening, Chat UX & Memory Management
+
+**Goal:** Fix the mesh defects found running the hub live (enrollment broken end-to-end, heartbeat timeouts on slow storage, no peer cleanup), and close the loop between the agent's chat and memory and the user in the UI.
+
+### 11.1 Version & Build
+- [x] VCS stamping (`70e5f56`): plain `go build`/Docker builds self-report `g<short-sha>[-dirty]` + commit date via `-ldflags` defaults
+
+### 11.2 Mesh Fixes (live-operation findings)
+- [x] Enrollment fixed end-to-end (`2209b77`) -- four stacked bugs had made mTLS enrollment nonfunctional: (1) `--enroll-url`/`--enroll-token` registered but never viper-bound, (2) `PKI.Load` demanded the CA private key enrolled nodes must never have, (3) node cert SANs are rejected by Go's verifier for IP-address connections so peer mTLS over LAN IPs never validated -- client now chain-verifies against the pinned CA (identity = CA membership), (4) enrollment never added the CA as a peer so heartbeats had no destination; plus enroll URL auto-normalization (http→https, trailing slash), heartbeat failures logged at warn, `pending-` placeholder peers excluded from gossip
+- [x] Peer management routes exempted from UI auth (`8b1882b`): `/api/v1/enroll`, `/api/v1/exec`, `/api/v1/docker/control` returned 401 before the one-time token check on auth-enabled hubs; exempted as mesh routes, guarded by a middleware unit test
+- [x] Heartbeat upserts batched into one transaction (`d499b72`): one fsync per heartbeat instead of N (hubs on slow container storage timed out heartbeats); heartbeat client timeout 10s → 30s
+- [x] Peer removal (`50ecf04`): `DELETE /api/v1/peers/{id}` (auth-protected, resolves by peer ID or address) + `remove_peer` agent tool (24 tools total); safe cleanup -- live peers re-add themselves on their next heartbeat
+
+### 11.3 Chat UX
+- [x] Rich markdown rendering (`92592ce`): marked (GFM: tables, task lists, strikethrough, fenced code) + DOMPurify sanitization, shared `renderMarkdown()` for the sidebar and full-page chat; dark-theme styles, safe links, scrollable table/code wrappers, copy buttons on code blocks; escaped-text fallback when the CDN libs are unavailable
+- [x] Chat survives page navigation (`83b12d5`): generation detached from the request context (`context.WithoutCancel` + 15 min cap) so replies persist after the browser aborts the fetch; the client restores the conversation from the server on every page load (session ID + pending marker in localStorage) and polls the session endpoint for in-flight replies (2s interval, 10 min deadline); failed exchanges persist as `error` turns (rendered red, excluded from LLM history); questions that never reached the hub are offered back into the input
+
+### 11.4 Agent Control UX
+- [x] Per-chat auto-approve toggle (`814caf2`): bolt icon in the chat header (amber = on, off by default for new chats, persisted per session via migration 011 `chat_sessions.auto_approve`); when on, an AUTO-APPROVE system-prompt section tells the model to act directly (announce command, least destructive approach, stop on surprises, never catastrophic commands) and `withAutoConfirm` injects `confirm=true` for gated tools (run_command, docker stop/restart, delete_host, integration delete) as a safety net; the executor gate and the exec-history/memory audit trail are unchanged; API: `GET /api/v1/llm/sessions/{id}`, `POST /api/v1/llm/sessions/{id}/auto-approve`
+- [x] Live-verified against qwen3.8:27b-mlx: with the toggle on `uname -a` executed unprompted and returned real output; with it off the identical request produced no execution and the agent presented the exact command for approval
+
+### 11.5 Memory Management UI
+- [x] Node Memory section on the host detail page (`72a9f87`): entries newest-first including homelab-wide ones (badged), with kind (action/note), origin (auto-recorded / AI note / user), detail, and timestamp
+- [x] Inline edit (title + detail) and delete with confirmation; `PATCH`/`DELETE /api/v1/memories/{id}` (auth-protected); kind/scope/source stay as recorded -- the agent recalls the edited version in future sessions
+- [x] Store: `GetMemory`/`UpdateMemory`/`DeleteMemory`; `InsertMemory` now returns the new row ID; unit test covers the full CRUD round-trip
+- [x] Live-verified in the browser: render, edit-persist, delete, 404/empty-title validation
+
+---
+
 ## Decision Log
 
 | Date | Decision | Rationale |
@@ -522,6 +552,14 @@ Root causes found by probing the live hub (proxmox1, standalone, 27 hosts):
 | 2026-08-24 | Passive transitions never alert | Phones/TVs leaving WiFi is presence, not an incident; dashboard status still updates |
 | 2026-08-24 | Debug endpoint auth-protected, mesh routes stay open | Peer comm must work tokenless; diagnostics are for the operator/agent |
 | 2026-08-24 | Event ring in memory, not DB | Debugging "what just happened" needs zero friction; persistent audit lives in exec_history/memories |
+| 2026-08-25 | Enrollment chain-verifies against the pinned CA, no hostname match | Node cert SANs can never cover LAN IPs; identity = possession of a CA-signed cert |
+| 2026-08-25 | Heartbeat upserts batched per transaction | One fsync per heartbeat; per-row writes on slow container storage timed out heartbeats entirely |
+| 2026-08-25 | Peer removal is safe cleanup, not destructive | Live peers re-add themselves on their next heartbeat; removal exists for stale/bogus entries |
+| 2026-08-27 | marked + DOMPurify for chat markdown | Full GFM for agent answers; output is inserted via x-html so sanitization must not depend on model behavior |
+| 2026-09-06 | Chat generation detached from the request context | The UI reloads on every navigation, aborting fetches; replies must run to completion and persist for the next page load |
+| 2026-09-06 | Failed exchanges persist as 'error' turns | A returning page must see the failure instead of waiting forever; error turns are excluded from LLM history |
+| 2026-09-07 | Auto-approve is per-chat, opt-in, prompt + injection | Convenience without weakening the default: executor gate stays, new chats default off, audit trail unchanged |
+| 2026-09-07 | Users edit memory title/detail only | Content is user-correctable; kind/scope/source stay system-owned so recall semantics don't drift |
 
 ---
 
@@ -529,5 +567,5 @@ Root causes found by probing the live hub (proxmox1, standalone, 27 hosts):
 
 | Node | OS | Address | Binary | Service |
 |------|----|---------|--------|---------|
-| Main16GB | Windows 11 Pro 25H2 | 192.168.178.44:9600 | Run from source (`go run .`) | Manual |
-| ubuntu | Ubuntu 24.04 | 192.168.178.45:9600 | /opt/homelabmon/homelabmon | systemd (homelabmon.service, user=dx) |
+| proxmox1 (hub) | Linux (Proxmox, Docker) | https://192.168.178.199:9600 | Docker image built from source | docker compose (no `--exec`, deliberate) |
+| mac-studio | macOS (Apple Silicon) | 192.168.178.250 (first mesh node, also runs Ollama) | local build, ad-hoc codesigned | manual |

@@ -170,6 +170,7 @@ delete_host(hostname, confirm)                             -> remove from CMDB
 manage_integration(action, name, confirm?)                 -> test / sync / delete integrations
 check_vendors()                                            -> re-resolve MAC OUI vendors
 add_peer(address)                                          -> connect a new node to the mesh
+remove_peer(address)                                       -> remove a mesh peer entry (live peers re-add via heartbeat)
 ```
 
 Remote execution (`--exec` per node, off by default): commands run in the node's
@@ -180,10 +181,19 @@ in `exec_history` on the requesting node. The tool requires `confirm=true` for
 every single command.
 
 Safety: disruptive actions (stop/restart container, delete host, delete integration)
-carry a `confirm` parameter. The system prompt instructs the model to ask the user
-first and only pass `confirm=true` after explicit agreement; the executor enforces
-the gate independently of the model. Executed actions are shown as badges in the
-chat UI and logged.
+and every shell command carry a `confirm` parameter. The system prompt instructs
+the model to ask the user first and only pass `confirm=true` after explicit
+agreement; the executor enforces the gate independently of the model. Executed
+actions are shown as badges in the chat UI and logged.
+
+**Per-chat auto-approve:** the chat header has a bolt toggle (off by default,
+per session, persisted in `chat_sessions.auto_approve`). When enabled, an
+AUTO-APPROVE section is appended to the system prompt so the model acts
+directly -- announcing each command, preferring the least destructive approach,
+stopping on surprises -- and the chat handler injects `confirm=true` for gated
+tools as a safety net if the model omits it. The executor gate and the
+exec-history/memory audit trail stay unchanged; new chats always start
+restricted.
 
 ## Agent Memory (Phase 9)
 
@@ -197,6 +207,14 @@ and why, config locations, known issues, user preferences -- and recalls
 everything with `recall_memory` when working on that node again. Recording
 never fails the action it describes.
 
+The same memory is visible to the user: the host detail page has a **Node
+Memory** section listing a node's entries (plus homelab-wide ones, badged)
+with kind, origin, and time. Users can correct or extend title/detail inline
+(`PATCH /api/v1/memories/{id}`) or delete entries
+(`DELETE /api/v1/memories/{id}`); kind, scope, and source stay as recorded,
+and since `recall_memory` reads the same table, the agent recalls the edited
+version in every future session.
+
 **Chat sessions** (`chat_sessions`/`chat_messages`): conversations persist
 across restarts. Each session gets an LLM-generated title (async, after the
 first exchange; falls back to a truncated user message). Messages carry the
@@ -207,6 +225,14 @@ deletes sessions.
 
 Chat UI in the sidebar with suggestion buttons, session history, and an action
 trail. Tool-calling loop (max 32 rounds) handles multi-step and fleet-wide workflows automatically.
+
+Agent answers render as rich markdown (marked, GFM: tables, task lists, fenced
+code with copy buttons) sanitized with DOMPurify before insertion. The chat
+survives page navigation: generation is detached from the request context so
+replies persist after the browser aborts the fetch, the client restores the
+conversation from the server on every page load (session ID in localStorage),
+and polls for a reply that was still generating. Failed exchanges persist as
+`error` turns so a returning page sees the failure instead of waiting.
 
 Users chat naturally: "What's running on the NAS?", "Any disk issues?", "Show me
 all Docker containers", "Restart jellyfin on the NAS", "Scan the network now".
@@ -262,6 +288,7 @@ Host detail page includes Chart.js time-series for CPU, Memory, Load Average, an
 linux/amd64    linux/arm64    linux/arm (RPi3/Zero)
 darwin/amd64   darwin/arm64   (Apple Silicon)
 windows/amd64
+freebsd/amd64  freebsd/arm64  (OPNsense)
 ```
 
 ## Directory Structure

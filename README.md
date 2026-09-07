@@ -18,9 +18,9 @@ A single-binary, zero-dependency homelab discovery and monitoring system with me
 - **Network scanning** -- ARP, mDNS, SNMP discover passive devices (phones, TVs, IoT, printers)
 - **Integrations** -- FRITZ!Box, Unifi, Home Assistant, Pi-hole, pfSense API pulls
 - **LLM chat** -- local Ollama integration: "What's running on my NAS?"
-- **AI agent** -- the chat can also *manage* the homelab: start/stop/restart Docker containers on any node, run shell commands on Linux/Windows/macOS/FreeBSD nodes, trigger scans, send notifications, change settings, rename/remove devices, test/sync integrations, and add mesh peers (with confirmation gates on every action)
-- **Agent memory** -- every management action is recorded per node; the agent recalls past actions and notes when working on a node again, and can store its own notes for future sessions
-- **Chat history** -- conversations are persisted with LLM-generated titles and can be resumed from the sidebar's History panel
+- **AI agent** -- the chat can also *manage* the homelab: start/stop/restart Docker containers on any node, run shell commands on Linux/Windows/macOS/FreeBSD nodes, trigger scans, send notifications, change settings, rename/remove devices, test/sync integrations, and add/remove mesh peers (with confirmation gates on every action, or flip the per-chat auto-approve toggle to let the agent act on its own)
+- **Agent memory** -- every management action is recorded per node; the agent recalls past actions and notes when working on a node again, and can store its own notes for future sessions; the same memory is shown on each host's page where you can correct or delete entries
+- **Chat history** -- conversations are persisted with LLM-generated titles and can be resumed from the sidebar's History panel; answers render as rich markdown (tables, lists, code blocks with copy buttons) and in-flight replies survive page navigation
 - **Remote commands** -- run devops commands on any node (package upgrades, service checks, logs) over the mesh; opt-in per node with `--exec`, full audit trail
 - **Lightweight CMDB** -- all devices in one SQLite database
 - **Notifications** -- ntfy.sh + webhook alerts for host offline / resource thresholds
@@ -212,7 +212,7 @@ The AI agent (and any node in the mesh) can run shell commands on any node start
 homelabmon --ui --exec          # this node accepts remote commands
 ```
 
-**Security**: remote execution is **off by default** and must be enabled per node. The AI agent must get your explicit confirmation for every command before executing it. On untrusted networks, enable mTLS (see below) so the exec endpoint is only reachable by enrolled nodes -- without mTLS, anyone who can reach port 9600 can run commands on a `--exec` node.
+**Security**: remote execution is **off by default** and must be enabled per node. The AI agent must get your explicit confirmation for every command before executing it. Optionally, the chat header has an **auto-approve toggle** (bolt icon, per chat, off by default) that lets the agent run commands and disruptive actions on its own in that conversation -- it still announces what it runs, and everything stays in the exec-history audit trail. On untrusted networks, enable mTLS (see below) so the exec endpoint is only reachable by enrolled nodes -- without mTLS, anyone who can reach port 9600 can run commands on a `--exec` node.
 
 ## FreeBSD / OPNsense
 
