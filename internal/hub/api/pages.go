@@ -576,6 +576,44 @@ func (u *UIServer) handleLLMSessions(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(sessions)
 }
 
+// handleLLMSessionGet returns one session (title, auto-approve state).
+func (u *UIServer) handleLLMSessionGet(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	id := r.PathValue("id")
+	sess, err := u.store.GetChatSession(r.Context(), id)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	if sess == nil {
+		// Session not started yet (no messages): default settings.
+		sess = &store.ChatSession{ID: id}
+	}
+	json.NewEncoder(w).Encode(sess)
+}
+
+// handleLLMAutoApprove toggles per-session auto-approval of confirmation-
+// gated actions (run_command, disruptive docker control, deletions).
+func (u *UIServer) handleLLMAutoApprove(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	id := r.PathValue("id")
+
+	var req struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Enabled == nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid request"})
+		return
+	}
+
+	if err := u.store.SetChatAutoApprove(r.Context(), id, *req.Enabled); err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	log.Info().Str("session", id).Bool("enabled", *req.Enabled).Msg("chat auto-approve changed")
+	json.NewEncoder(w).Encode(map[string]interface{}{"auto_approve": *req.Enabled})
+}
+
 func (u *UIServer) handleLLMSessionMessages(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := r.PathValue("id")

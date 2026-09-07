@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"time"
 )
 
@@ -12,6 +13,7 @@ type ChatSession struct {
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 	MessageCount int       `json:"message_count"`
+	AutoApprove  bool      `json:"auto_approve"`
 }
 
 // ChatMessage is one persisted chat turn.
@@ -48,7 +50,7 @@ func (s *Store) ListChatSessions(ctx context.Context, limit int) ([]ChatSession,
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, title, created_at, updated_at, message_count
+		SELECT id, title, created_at, updated_at, message_count, auto_approve
 		FROM chat_sessions ORDER BY updated_at DESC LIMIT ?
 	`, limit)
 	if err != nil {
@@ -60,14 +62,61 @@ func (s *Store) ListChatSessions(ctx context.Context, limit int) ([]ChatSession,
 	for rows.Next() {
 		var cs ChatSession
 		var createdAt, updatedAt string
-		if err := rows.Scan(&cs.ID, &cs.Title, &createdAt, &updatedAt, &cs.MessageCount); err != nil {
+		var autoApprove int
+		if err := rows.Scan(&cs.ID, &cs.Title, &createdAt, &updatedAt, &cs.MessageCount, &autoApprove); err != nil {
 			return nil, err
 		}
 		cs.CreatedAt = parseTime(createdAt)
 		cs.UpdatedAt = parseTime(updatedAt)
+		cs.AutoApprove = autoApprove != 0
 		list = append(list, cs)
 	}
 	return list, nil
+}
+
+// GetChatSession returns one session, or nil if it does not exist yet.
+func (s *Store) GetChatSession(ctx context.Context, sessionID string) (*ChatSession, error) {
+	var cs ChatSession
+	var createdAt, updatedAt string
+	var autoApprove int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, title, created_at, updated_at, message_count, auto_approve
+		FROM chat_sessions WHERE id = ?
+	`, sessionID).Scan(&cs.ID, &cs.Title, &createdAt, &updatedAt, &cs.MessageCount, &autoApprove)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	cs.CreatedAt = parseTime(createdAt)
+	cs.UpdatedAt = parseTime(updatedAt)
+	cs.AutoApprove = autoApprove != 0
+	return &cs, nil
+}
+
+// GetChatAutoApprove reports whether the session has auto-approve enabled.
+// Sessions that do not exist yet are not auto-approved.
+func (s *Store) GetChatAutoApprove(ctx context.Context, sessionID string) (bool, error) {
+	sess, err := s.GetChatSession(ctx, sessionID)
+	if err != nil || sess == nil {
+		return false, err
+	}
+	return sess.AutoApprove, nil
+}
+
+// SetChatAutoApprove toggles auto-approve for a session, creating the session
+// row if the toggle is flipped before the first message is sent.
+func (s *Store) SetChatAutoApprove(ctx context.Context, sessionID string, on bool) error {
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT OR IGNORE INTO chat_sessions (id) VALUES (?)
+	`, sessionID); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE chat_sessions SET auto_approve = ? WHERE id = ?
+	`, boolToInt(on), sessionID)
+	return err
 }
 
 // GetChatMessages returns the last messages of a session in chronological

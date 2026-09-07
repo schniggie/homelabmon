@@ -145,6 +145,12 @@
                     <span class="text-[10px] mr-1" :class="connected ? 'text-green-400' : 'text-red-400'">
                         <i class="fa-solid fa-circle"></i>
                     </span>
+                    <button @click="toggleAutoApprove()"
+                        class="px-1 py-0.5 text-xs"
+                        :class="autoApprove ? 'text-amber-400' : 'text-gray-500 hover:text-gray-300'"
+                        title="Auto-approve commands: the agent executes commands and disruptive actions without asking (this chat only)">
+                        <i class="fa-solid fa-bolt"></i>
+                    </button>
                     <button @click="newSession()"
                         class="text-gray-500 hover:text-gray-300 px-1 py-0.5 text-xs" title="New chat">
                         <i class="fa-solid fa-plus"></i>
@@ -281,6 +287,7 @@
                 (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString()),
             pollTimer: null,
             loaded: false,
+            autoApprove: false,
 
             init() {
                 this.checkConnection();
@@ -289,6 +296,31 @@
 
             saveSide() {
                 localStorage.setItem('hlm-chat-side', this.side);
+            },
+
+            async loadAutoApprove() {
+                try {
+                    const resp = await fetch('/api/v1/llm/sessions/' + this.sessionId);
+                    if (resp.ok) {
+                        const sess = await resp.json();
+                        this.autoApprove = !!sess.auto_approve;
+                    }
+                } catch {
+                    this.autoApprove = false;
+                }
+            },
+
+            async toggleAutoApprove() {
+                const next = !this.autoApprove;
+                try {
+                    const resp = await fetch('/api/v1/llm/sessions/' + this.sessionId + '/auto-approve', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ enabled: next })
+                    });
+                    const data = await resp.json();
+                    if (!data.error) this.autoApprove = !!data.auto_approve;
+                } catch {}
             },
 
             saveSessionId() {
@@ -319,6 +351,7 @@
             // server-side and is persisted there.
             async restoreSession() {
                 this.saveSessionId();
+                this.loadAutoApprove();
                 let msgs = null;
                 try {
                     const resp = await fetch('/api/v1/llm/sessions/' + this.sessionId + '/messages');
@@ -445,6 +478,7 @@
                 this.clearPending();
                 this.sessionId = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString();
                 this.saveSessionId();
+                this.autoApprove = false;
                 this.messages = [];
                 this.input = '';
             },
@@ -463,6 +497,7 @@
                 this.clearPending();
                 this.sessionId = id;
                 this.saveSessionId();
+                this.loadAutoApprove();
                 try {
                     const resp = await fetch('/api/v1/llm/sessions/' + id + '/messages');
                     const msgs = await resp.json();

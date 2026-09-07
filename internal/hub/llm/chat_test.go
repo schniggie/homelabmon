@@ -21,6 +21,8 @@ type fakeOllama struct {
 	lastBody   string
 	titleCalls int
 	delay      time.Duration // artificial latency before answering
+	toolFirst  bool          // first chat request answers with a run_command tool call
+	chatCalls  int
 }
 
 func newFakeOllama(t *testing.T) *fakeOllama {
@@ -35,6 +37,23 @@ func newFakeOllama(t *testing.T) *fakeOllama {
 
 		if f.delay > 0 {
 			time.Sleep(f.delay)
+		}
+
+		f.chatCalls++
+		if f.toolFirst && f.chatCalls == 1 {
+			json.NewEncoder(w).Encode(ChatResponse{
+				Message: Message{
+					Role: "assistant",
+					ToolCalls: []ToolCall{{
+						Function: ToolCallFunction{
+							Name:      "run_command",
+							Arguments: json.RawMessage(`{"command":"uname -a"}`),
+						},
+					}},
+				},
+				Done: true,
+			})
+			return
 		}
 
 		content := "The answer is 42."
@@ -196,5 +215,94 @@ func TestChatErrorPersistsErrorTurn(t *testing.T) {
 	}
 	if msgs[1].Role != "error" || !strings.Contains(msgs[1].Content, "500") {
 		t.Errorf("second message = %q/%q, want error turn mentioning 500", msgs[1].Role, msgs[1].Content)
+	}
+}
+
+func TestWithAutoConfirm(t *testing.T) {
+	gated := json.RawMessage(`{"command":"uname -a"}`)
+	got := withAutoConfirm("run_command", gated)
+	if !strings.Contains(string(got), `"confirm":true`) {
+		t.Errorf("confirm not injected: %s", got)
+	}
+	already := json.RawMessage(`{"command":"x","confirm":true}`)
+	if got = withAutoConfirm("run_command", already); string(got) != string(already) {
+		t.Errorf("existing confirm overwritten: %s", got)
+	}
+	readTool := json.RawMessage(`{"hostname":"web"} `)
+	if got = withAutoConfirm("list_hosts", readTool); string(got) == string(json.RawMessage(`{"hostname":"web","confirm":true} `)) {
+		t.Errorf("confirm injected into non-gated tool: %s", got)
+	}
+}
+
+// TestAutoApproveOffRequiresConfirmation verifies the default: a run_command
+// tool call without confirm hits the executor's confirmation gate.
+func TestAutoApproveOffRequiresConfirmation(t *testing.T) {
+	h, _, fake := newTestChatHandler(t)
+	fake.toolFirst = true
+
+	if _, _, err := h.Chat(context.Background(), "sess-guard", "run uname"); err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	// The tool result fed back to the LLM must be the confirmation refusal,
+	// i.e. the executor gate held without auto-approve
+	if !strings.Contains(fake.lastBody, "confirmation required") {
+		t.Fatalf("expected confirmation-required tool result in LLM context, got: %s", truncate(fake.lastBody, 500))
+	}
+	if strings.Contains(fake.lastBody, "AUTO-APPROVE MODE") {
+		t.Errorf("auto-approve prompt leaked into non-auto session")
+	}
+}
+
+// TestAutoApproveSessionExecutesWithoutConfirm verifies that a session with
+// auto-approve enabled injects confirm=true and tells the model it may act.
+func TestAutoApproveSessionExecutesWithoutConfirm(t *testing.T) {
+	h, st, fake := newTestChatHandler(t)
+	fake.toolFirst = true
+
+	if err := st.SetChatAutoApprove(context.Background(), "sess-auto", true); err != nil {
+		t.Fatalf("set auto approve: %v", err)
+	}
+	on, err := st.GetChatAutoApprove(context.Background(), "sess-auto")
+	if err != nil || !on {
+		t.Fatalf("flag not persisted: on=%v err=%v", on, err)
+	}
+
+	if _, _, err := h.Chat(context.Background(), "sess-auto", "run uname"); err != nil {
+		t.Fatalf("chat: %v", err)
+	}
+	// confirm was injected, so the executor got past the gate (and stopped at
+	// the missing exec router instead of asking for confirmation)
+	if !strings.Contains(fake.lastBody, "not available") {
+		t.Errorf("expected post-gate executor error in LLM context, got: %s", truncate(fake.lastBody, 500))
+	}
+	if !strings.Contains(fake.lastBody, "AUTO-APPROVE MODE") {
+		t.Errorf("auto-approve system prompt missing")
+	}
+}
+
+// TestSetAutoApproveCreatesSession verifies the toggle works before the first
+// message exists and shows up in the session list.
+func TestSetAutoApproveCreatesSession(t *testing.T) {
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	if on, _ := st.GetChatAutoApprove(context.Background(), "brand-new"); on {
+		t.Fatal("nonexistent session must not be auto-approved")
+	}
+	if err := st.SetChatAutoApprove(context.Background(), "brand-new", true); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	sessions, _ := st.ListChatSessions(context.Background(), 10)
+	if len(sessions) != 1 || !sessions[0].AutoApprove {
+		t.Fatalf("session list missing flag: %+v", sessions)
+	}
+	if err := st.SetChatAutoApprove(context.Background(), "brand-new", false); err != nil {
+		t.Fatalf("unset: %v", err)
+	}
+	if on, _ := st.GetChatAutoApprove(context.Background(), "brand-new"); on {
+		t.Fatal("flag not cleared")
 	}
 }

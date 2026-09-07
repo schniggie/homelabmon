@@ -12,7 +12,7 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-const systemPrompt = `You are HomelabMon's AI agent. You monitor AND manage the user's homelab: a mesh of nodes running services, Docker containers, network devices, and external integrations.
+const systemPromptBase = `You are HomelabMon's AI agent. You monitor AND manage the user's homelab: a mesh of nodes running services, Docker containers, network devices, and external integrations.
 
 You have full access to the platform through tools:
 
@@ -50,6 +50,50 @@ Working style:
 - If something isn't found or fails, say so clearly and suggest the next step
 - You can chain multiple tool calls for complex requests
 - If the user asks for something beyond your tools, say what you can do instead`
+
+// autoApprovePrompt is appended to the system prompt for sessions where the
+// user enabled auto-approval, so the model acts instead of asking.
+const autoApprovePrompt = `
+
+AUTO-APPROVE MODE (this session only): The user has enabled auto-approval.
+You may run confirmation-gated actions (run_command, docker stop/restart,
+delete_host, integration delete) on your own: pass confirm=true directly and
+do not ask for permission first. Rules that still apply:
+- Announce each command briefly as you run it (command + target host).
+- Prefer the least destructive command that gets the job done.
+- Stop and report immediately if a command fails or shows something unexpected
+  that would change the plan.
+- Never run obviously catastrophic commands (rm -rf /, disk wipes, firewall
+  lockouts) even though the mode allows them.`
+
+// confirmGatedTools are tools whose executor checks the confirm argument.
+var confirmGatedTools = map[string]bool{
+	"run_command":        true,
+	"docker_control":     true,
+	"delete_host":        true,
+	"manage_integration": true,
+}
+
+// withAutoConfirm injects confirm=true into a gated tool call so auto-approve
+// sessions pass the executor's gate even when the model omits the flag.
+func withAutoConfirm(name string, args json.RawMessage) json.RawMessage {
+	if !confirmGatedTools[name] {
+		return args
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(args, &m); err != nil {
+		return args
+	}
+	if b, ok := m["confirm"].(bool); ok && b {
+		return args
+	}
+	m["confirm"] = true
+	b, err := json.Marshal(m)
+	if err != nil {
+		return args
+	}
+	return b
+}
 
 // maxToolRounds limits tool-calling loops to prevent infinite cycles.
 // Set high enough for fleet-wide devops workflows (e.g. one command per host
@@ -97,7 +141,16 @@ func (h *ChatHandler) Chat(ctx context.Context, sessionID, userMessage string) (
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	autoApprove, err := h.store.GetChatAutoApprove(ctx, sessionID)
+	if err != nil {
+		log.Warn().Err(err).Msg("load chat auto-approve")
+	}
+
 	// Load persisted history (system prompt + last turns)
+	systemPrompt := systemPromptBase
+	if autoApprove {
+		systemPrompt += autoApprovePrompt
+	}
 	messages := []Message{{Role: "system", Content: systemPrompt}}
 	persisted, err := h.store.GetChatMessages(ctx, sessionID, 2*20)
 	if err == nil {
@@ -139,7 +192,11 @@ func (h *ChatHandler) Chat(ctx context.Context, sessionID, userMessage string) (
 				RawJSON("args", tc.Function.Arguments).
 				Msg("LLM tool call")
 
-			result, err := h.executor.Execute(ctx, tc.Function.Name, tc.Function.Arguments)
+			callArgs := tc.Function.Arguments
+			if autoApprove {
+				callArgs = withAutoConfirm(tc.Function.Name, callArgs)
+			}
+			result, err := h.executor.Execute(ctx, tc.Function.Name, callArgs)
 			if err != nil {
 				result = fmt.Sprintf(`{"error":"%s"}`, err.Error())
 			}
