@@ -195,6 +195,61 @@
 
 {{end}}
 
+<div class="bg-gray-900 border border-gray-800 rounded-lg p-6 mb-6">
+    <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-semibold"><i class="fa-solid fa-brain mr-2 text-purple-400"></i>Node Memory</h2>
+        <span class="text-xs text-gray-500">recalled by the AI agent &middot; edits apply to future chats</span>
+    </div>
+    {{if .Memories}}
+    <div class="space-y-2">
+        {{range .Memories}}
+        <div class="mem-entry bg-gray-800/50 rounded p-3 group"
+             x-data="memEntry({{.ID}}, {{json .Title}}, {{json .Detail}})">
+            <div x-show="!edit">
+                <div class="flex items-center gap-2 flex-wrap">
+                    <span class="font-medium text-sm" x-text="title"></span>
+                    {{if eq .Scope "global"}}
+                    <span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-700/60 text-gray-400" title="Not specific to this node"><i class="fa-solid fa-globe mr-0.5"></i>homelab-wide</span>
+                    {{end}}
+                    <span class="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-300">{{.Kind}}</span>
+                    {{if eq .Source "agent"}}
+                    <span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-700/40 text-gray-400"><i class="fa-solid fa-robot mr-0.5"></i>auto-recorded</span>
+                    {{else if eq .Source "llm"}}
+                    <span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-700/40 text-gray-400"><i class="fa-solid fa-wand-magic-sparkles mr-0.5"></i>AI note</span>
+                    {{else}}
+                    <span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-700/40 text-gray-400"><i class="fa-solid fa-user mr-0.5"></i>user</span>
+                    {{end}}
+                    <div class="ml-auto hidden group-hover:flex items-center gap-1">
+                        <button @click="edit = true" class="text-gray-500 hover:text-blue-400 text-xs px-1" title="Edit entry">
+                            <i class="fa-solid fa-pen-to-square"></i>
+                        </button>
+                        <button @click="remove()" class="text-gray-500 hover:text-red-400 text-xs px-1" title="Delete entry">
+                            <i class="fa-solid fa-trash"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="text-sm text-gray-300 whitespace-pre-wrap mt-1" x-show="detail" x-text="detail"></div>
+                <div class="text-[10px] text-gray-500 mt-1">{{formatTime .CreatedAt}}</div>
+            </div>
+            <div x-show="edit" x-cloak class="space-y-2">
+                <input x-model="title" class="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm focus:outline-none focus:border-purple-500" placeholder="Title">
+                <textarea x-model="detail" rows="4" class="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-purple-500" placeholder="Detail"></textarea>
+                <div class="flex justify-end gap-2">
+                    <button @click="cancel()" class="text-xs text-gray-400 hover:text-gray-200 px-3 py-1">Cancel</button>
+                    <button @click="save()" :disabled="busy || !title.trim()"
+                        class="text-xs bg-purple-600 hover:bg-purple-500 disabled:bg-gray-700 disabled:text-gray-500 text-white px-3 py-1 rounded">
+                        <i x-show="!busy" class="fa-solid fa-check mr-1"></i><i x-show="busy" x-cloak class="fa-solid fa-spinner fa-spin mr-1"></i>Save
+                    </button>
+                </div>
+            </div>
+        </div>
+        {{end}}
+    </div>
+    {{else}}
+    <p class="text-gray-500 text-sm">No memory recorded yet. The agent records every management action automatically and can store notes — ask it to "remember" something about this node.</p>
+    {{end}}
+</div>
+
 <div class="bg-gray-900 border border-gray-800 rounded-lg p-6">
     <h2 class="text-lg font-semibold mb-4"><i class="fa-solid fa-hard-drive mr-2 text-gray-400"></i>Disk Usage</h2>
     {{if .Disks}}

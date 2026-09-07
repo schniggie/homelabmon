@@ -219,3 +219,59 @@ document.addEventListener('click', function(e) {
         }, 1200);
     }).catch(() => {});
 });
+
+// Editable memory entry on the host detail page
+function memEntry(id, title, detail) {
+    return {
+        id,
+        edit: false,
+        busy: false,
+        title,
+        detail,
+        origTitle: title,
+        origDetail: detail,
+
+        cancel() {
+            this.edit = false;
+            this.title = this.origTitle;
+            this.detail = this.origDetail;
+        },
+
+        async save() {
+            const t = this.title.trim();
+            if (!t || this.busy) return;
+            this.busy = true;
+            try {
+                const resp = await fetch('/api/v1/memories/' + this.id, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title: t, detail: this.detail })
+                });
+                const data = await resp.json().catch(() => ({}));
+                if (resp.ok && !data.error) {
+                    this.origTitle = t;
+                    this.origDetail = this.detail;
+                    this.title = t;
+                    this.edit = false;
+                    return;
+                }
+            } catch {}
+            this.busy = false;
+        },
+
+        async remove() {
+            if (this.busy || !confirm('Delete this memory entry? The agent will no longer recall it.')) return;
+            this.busy = true;
+            try {
+                const resp = await fetch('/api/v1/memories/' + this.id, { method: 'DELETE' });
+                const data = await resp.json().catch(() => ({}));
+                if (resp.ok && !data.error) {
+                    const el = this.$el.closest('.mem-entry');
+                    if (el) el.remove();
+                    return;
+                }
+            } catch {}
+            this.busy = false;
+        }
+    };
+}

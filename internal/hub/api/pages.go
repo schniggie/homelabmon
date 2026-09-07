@@ -169,6 +169,7 @@ type hostDetailData struct {
 	Metric      *models.MetricSnapshot
 	Disks       []models.DiskUsage
 	Services    []models.DiscoveredService
+	Memories    []store.Memory
 }
 
 func (u *UIServer) handleHostDetail(w http.ResponseWriter, r *http.Request) {
@@ -209,6 +210,8 @@ func (u *UIServer) handleHostDetail(w http.ResponseWriter, r *http.Request) {
 
 	svcs, _ := u.store.ListServicesByHost(r.Context(), id)
 	data.Services = svcs
+
+	data.Memories, _ = u.store.ListMemories(r.Context(), id, "", 50)
 
 	if err := u.hostTmpl.ExecuteTemplate(w, "layout", data); err != nil {
 		log.Error().Err(err).Msg("render host detail")
@@ -646,6 +649,63 @@ func (u *UIServer) handleLLMDeleteSession(w http.ResponseWriter, r *http.Request
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleUpdateMemory lets the user correct or extend a recorded memory
+// entry; the agent recalls the edited version in later sessions.
+func (u *UIServer) handleUpdateMemory(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid id"})
+		return
+	}
+
+	var req struct {
+		Title  *string `json:"title"`
+		Detail *string `json:"detail"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Title == nil || req.Detail == nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": "title and detail are required"})
+		return
+	}
+	title := strings.TrimSpace(*req.Title)
+	if title == "" {
+		json.NewEncoder(w).Encode(map[string]string{"error": "title must not be empty"})
+		return
+	}
+
+	mem, err := u.store.GetMemory(r.Context(), id)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	if mem == nil {
+		http.NotFound(w, r)
+		return
+	}
+	if err := u.store.UpdateMemory(r.Context(), id, title, *req.Detail); err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	log.Info().Int64("id", id).Msg("memory entry edited by user")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleDeleteMemory removes a memory entry permanently.
+func (u *UIServer) handleDeleteMemory(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid id"})
+		return
+	}
+	if err := u.store.DeleteMemory(r.Context(), id); err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	log.Info().Int64("id", id).Msg("memory entry deleted by user")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"time"
 )
 
@@ -21,10 +22,55 @@ type Memory struct {
 }
 
 func (s *Store) InsertMemory(ctx context.Context, m *Memory) error {
-	_, err := s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO memories (host_id, hostname, scope, kind, title, detail, source, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`, m.HostID, m.Hostname, m.Scope, m.Kind, m.Title, m.Detail, m.Source, m.CreatedAt.UTC())
+	if err != nil {
+		return err
+	}
+	if id, err := res.LastInsertId(); err == nil {
+		m.ID = id
+	}
+	return nil
+}
+
+// GetMemory returns one memory entry, or nil if it does not exist.
+func (s *Store) GetMemory(ctx context.Context, id int64) (*Memory, error) {
+	var m Memory
+	var createdAt string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, host_id, hostname, scope, kind, title, detail, source, created_at
+		FROM memories WHERE id = ?
+	`, id).Scan(&m.ID, &m.HostID, &m.Hostname, &m.Scope, &m.Kind, &m.Title, &m.Detail, &m.Source, &createdAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	m.CreatedAt = parseTime(createdAt)
+	return &m, nil
+}
+
+// UpdateMemory rewrites title and detail of an entry (user edit). Kind,
+// scope, and source stay as recorded; the agent recalls the edited version.
+func (s *Store) UpdateMemory(ctx context.Context, id int64, title, detail string) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE memories SET title = ?, detail = ? WHERE id = ?
+	`, title, detail, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// DeleteMemory removes an entry permanently.
+func (s *Store) DeleteMemory(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM memories WHERE id = ?`, id)
 	return err
 }
 

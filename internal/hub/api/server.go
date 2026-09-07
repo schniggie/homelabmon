@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"io/fs"
@@ -68,6 +69,10 @@ func NewUIServer(s *store.Store, collector *agent.Collector, identity *models.No
 			return h.Label()
 		},
 		"splitServices": splitServices,
+		"json": func(v interface{}) (string, error) {
+			b, err := json.Marshal(v)
+			return string(b), err
+		},
 	}
 
 	// Parse each page template separately with layout to avoid "content" name collisions
@@ -151,6 +156,10 @@ func (u *UIServer) SetupRoutes(mux *http.ServeMux) {
 
 	// Debug (auth-protected; not a mesh route)
 	mux.HandleFunc("GET /api/v1/debug/diagnostics", u.handleDebugDiagnostics)
+
+	// Node memory (user edit/delete of agent-recorded entries)
+	mux.HandleFunc("PATCH /api/v1/memories/{id}", u.handleUpdateMemory)
+	mux.HandleFunc("DELETE /api/v1/memories/{id}", u.handleDeleteMemory)
 
 	// Host management
 	mux.HandleFunc("POST /api/v1/hosts/{id}/rename", u.handleRenameHost)
