@@ -178,7 +178,7 @@
 
             <!-- Chat Messages -->
             <div class="flex-1 overflow-y-auto px-3 py-3 space-y-3" x-ref="messages">
-                <template x-if="messages.length === 0 && !loading">
+                <template x-if="loaded && messages.length === 0 && !loading">
                     <div class="flex flex-col items-center justify-center h-full text-gray-500">
                         <i class="fa-solid fa-comments text-3xl mb-3 text-gray-700"></i>
                         <p class="text-sm mb-3">Ask about or manage your homelab</p>
@@ -215,9 +215,14 @@
                     <div :class="msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'">
                         <div :class="msg.role === 'user'
                             ? 'bg-blue-600 text-white rounded-lg rounded-br-none px-3 py-2 max-w-[85%]'
-                            : 'bg-gray-800 text-gray-100 rounded-lg rounded-bl-none px-3 py-2 max-w-[85%]'">
+                            : (msg.role === 'error'
+                                ? 'bg-red-900/40 border border-red-800/60 text-red-200 rounded-lg rounded-bl-none px-3 py-2 max-w-[85%]'
+                                : 'bg-gray-800 text-gray-100 rounded-lg rounded-bl-none px-3 py-2 max-w-[85%]')">
                             <div class="text-[10px] text-gray-400 mb-0.5" x-show="msg.role !== 'user'">
-                                <i class="fa-solid fa-robot mr-0.5 text-purple-400"></i>AI
+                                <i :class="msg.role === 'error'
+                                    ? 'fa-solid fa-triangle-exclamation text-red-400'
+                                    : 'fa-solid fa-robot mr-0.5 text-purple-400'"></i><span
+                                    x-text="msg.role === 'error' ? 'Error' : 'AI'"></span>
                             </div>
                             <div class="text-xs leading-relaxed chat-md" x-html="renderMarkdown(msg.content)"></div>
                             <div x-show="msg.actions && msg.actions.length" class="mt-1.5 flex flex-wrap gap-1">
@@ -272,14 +277,115 @@
             loading: false,
             connected: false,
             model: '',
-            sessionId: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(),
+            sessionId: localStorage.getItem('hlm-chat-session') ||
+                (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString()),
+            pollTimer: null,
+            loaded: false,
 
             init() {
                 this.checkConnection();
+                this.restoreSession();
             },
 
             saveSide() {
                 localStorage.setItem('hlm-chat-side', this.side);
+            },
+
+            saveSessionId() {
+                localStorage.setItem('hlm-chat-session', this.sessionId);
+            },
+
+            getPending() {
+                try { return JSON.parse(localStorage.getItem('hlm-chat-pending') || 'null'); }
+                catch { return null; }
+            },
+            setPending(text) {
+                localStorage.setItem('hlm-chat-pending',
+                    JSON.stringify({ sid: this.sessionId, ts: Date.now(), text: text }));
+            },
+            clearPending() {
+                localStorage.removeItem('hlm-chat-pending');
+            },
+
+            adapt(msgs) {
+                return (msgs || []).map(m => ({
+                    role: m.role, content: m.content, actions: m.actions || []
+                }));
+            },
+
+            // Chat state lives on the server; the page only mirrors it. Restore
+            // the conversation on load and resume a request that was still
+            // running when the previous page was left — generation continues
+            // server-side and is persisted there.
+            async restoreSession() {
+                this.saveSessionId();
+                let msgs = null;
+                try {
+                    const resp = await fetch('/api/v1/llm/sessions/' + this.sessionId + '/messages');
+                    if (resp.ok) msgs = await resp.json();
+                } catch {}
+                if (!msgs || !msgs.length) {
+                    // Nothing persisted for this session: the question probably
+                    // never reached the hub before navigation. Offer it back.
+                    const pending = this.getPending();
+                    this.clearPending();
+                    if (pending && pending.sid === this.sessionId && pending.text &&
+                        Date.now() - pending.ts < 60000 && !this.input) {
+                        this.input = pending.text;
+                    }
+                    this.loaded = true;
+                    return;
+                }
+                this.messages = this.adapt(msgs);
+                this.loaded = true;
+                this.scrollToBottom();
+                const pending = this.getPending();
+                if (!pending || pending.sid !== this.sessionId) return;
+                const last = this.messages[this.messages.length - 1];
+                if (last && (last.role === 'assistant' || last.role === 'error')) {
+                    this.clearPending(); // finished while we were away
+                } else if (last && last.role === 'user') {
+                    this.awaitOrphanedReply(pending);
+                } else {
+                    this.clearPending();
+                }
+            },
+
+            // Poll the session until the reply to a request that was sent before
+            // a page change shows up (give up after 10 minutes).
+            awaitOrphanedReply(pending) {
+                this.loading = true;
+                const deadline = (pending.ts || Date.now()) + 10 * 60 * 1000;
+                const finish = (note) => {
+                    if (note) this.messages.push({ role: 'error', content: note, actions: [] });
+                    this.clearPending();
+                    this.loading = false;
+                    this.scrollToBottom();
+                };
+                const tick = async () => {
+                    try {
+                        const resp = await fetch('/api/v1/llm/sessions/' + this.sessionId + '/messages');
+                        if (resp.ok) {
+                            const msgs = await resp.json();
+                            const last = msgs[msgs.length - 1];
+                            if (last && last.role !== 'user') {
+                                this.messages = this.adapt(msgs);
+                                finish();
+                                return;
+                            }
+                        }
+                    } catch {}
+                    if (Date.now() > deadline) {
+                        finish('No response after 10 minutes — the model may be stuck. Check History later.');
+                        return;
+                    }
+                    this.pollTimer = setTimeout(tick, 2000);
+                };
+                this.pollTimer = setTimeout(tick, 2000);
+            },
+
+            stopPolling() {
+                if (this.pollTimer) { clearTimeout(this.pollTimer); this.pollTimer = null; }
             },
 
             async checkConnection() {
@@ -300,6 +406,7 @@
                 this.messages.push({ role: 'user', content: text });
                 this.input = '';
                 this.loading = true;
+                this.setPending(text);
                 this.scrollToBottom();
 
                 try {
@@ -310,14 +417,15 @@
                     });
                     const data = await resp.json();
                     if (data.error) {
-                        this.messages.push({ role: 'assistant', content: 'Error: ' + data.error, actions: [] });
+                        this.messages.push({ role: 'error', content: data.error, actions: [] });
                     } else {
                         this.messages.push({ role: 'assistant', content: data.response, actions: data.actions || [] });
                     }
                 } catch (err) {
-                    this.messages.push({ role: 'assistant', content: 'Error: Could not reach the AI service.' });
+                    this.messages.push({ role: 'error', content: 'Error: Could not reach the AI service.', actions: [] });
                 }
 
+                this.clearPending();
                 this.loading = false;
                 this.scrollToBottom();
                 this.$refs.chatInput && this.$refs.chatInput.focus();
@@ -333,7 +441,10 @@
             },
 
             newSession() {
+                this.stopPolling();
+                this.clearPending();
                 this.sessionId = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString();
+                this.saveSessionId();
                 this.messages = [];
                 this.input = '';
             },
@@ -348,15 +459,14 @@
             },
 
             async openSession(id) {
+                this.stopPolling();
+                this.clearPending();
+                this.sessionId = id;
+                this.saveSessionId();
                 try {
                     const resp = await fetch('/api/v1/llm/sessions/' + id + '/messages');
                     const msgs = await resp.json();
-                    this.sessionId = id;
-                    this.messages = (msgs || []).map(m => ({
-                        role: m.role,
-                        content: m.content,
-                        actions: m.actions || []
-                    }));
+                    this.messages = this.adapt(msgs);
                     this.scrollToBottom();
                 } catch {}
             },

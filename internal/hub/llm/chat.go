@@ -87,6 +87,13 @@ func NewChatHandler(client *Client, executor *ToolExecutor, s *store.Store) *Cha
 func (h *ChatHandler) Chat(ctx context.Context, sessionID, userMessage string) (string, []Action, error) {
 	var actions []Action
 
+	// The requesting page may vanish at any moment: the UI reloads on every
+	// navigation, aborting in-flight fetches, which would otherwise cancel the
+	// generation half-way. Detach from the caller's context so the exchange
+	// runs to completion and persists for the next page load to pick up.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Minute)
+	defer cancel()
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -110,6 +117,7 @@ func (h *ChatHandler) Chat(ctx context.Context, sessionID, userMessage string) (
 	for round := 0; round < maxToolRounds; round++ {
 		resp, err := h.client.Chat(ctx, messages, tools)
 		if err != nil {
+			h.persistError(ctx, sessionID, err)
 			return "", actions, fmt.Errorf("LLM error: %w", err)
 		}
 
@@ -153,6 +161,7 @@ func (h *ChatHandler) Chat(ctx context.Context, sessionID, userMessage string) (
 	// Exceeded max rounds - force a final response without tools
 	resp, err := h.client.Chat(ctx, messages, nil)
 	if err != nil {
+		h.persistError(ctx, sessionID, err)
 		return "", actions, err
 	}
 	h.persist(ctx, sessionID, resp.Message.Content, actions)
@@ -168,6 +177,16 @@ func (h *ChatHandler) persist(ctx context.Context, sessionID, content string, ac
 	actionsJSON, _ := json.Marshal(actions)
 	if err := h.store.AppendChatMessage(ctx, sessionID, "assistant", content, string(actionsJSON)); err != nil {
 		log.Warn().Err(err).Msg("persist chat message")
+	}
+}
+
+// persistError records a failed exchange as an 'error' turn so a client that
+// left mid-request sees the failure on its next page load instead of waiting
+// forever. Role 'error' is skipped when persisted history is fed back to the
+// LLM.
+func (h *ChatHandler) persistError(ctx context.Context, sessionID string, chatErr error) {
+	if err := h.store.AppendChatMessage(ctx, sessionID, "error", "LLM error: "+chatErr.Error(), "[]"); err != nil {
+		log.Warn().Err(err).Msg("persist chat error")
 	}
 }
 

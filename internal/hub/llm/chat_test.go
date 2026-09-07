@@ -20,6 +20,7 @@ type fakeOllama struct {
 	server     *httptest.Server
 	lastBody   string
 	titleCalls int
+	delay      time.Duration // artificial latency before answering
 }
 
 func newFakeOllama(t *testing.T) *fakeOllama {
@@ -31,6 +32,10 @@ func newFakeOllama(t *testing.T) *fakeOllama {
 		json.NewDecoder(r.Body).Decode(&req)
 		b, _ := json.Marshal(req)
 		f.lastBody = string(b)
+
+		if f.delay > 0 {
+			time.Sleep(f.delay)
+		}
 
 		content := "The answer is 42."
 		if req.Tools == nil {
@@ -125,5 +130,71 @@ func TestChatHistoryLoadedFromStore(t *testing.T) {
 	msgs, _ := st.GetChatMessages(context.Background(), "sess-2", 10)
 	if len(msgs) != 0 {
 		t.Errorf("session not deleted: %d messages remain", len(msgs))
+	}
+}
+
+// TestChatCompletesAfterCallerCancel verifies that a chat survives the caller
+// walking away: the UI aborts the HTTP request on navigation, and generation
+// must still run to completion and persist for the next page load.
+func TestChatCompletesAfterCallerCancel(t *testing.T) {
+	h, st, fake := newTestChatHandler(t)
+	fake.delay = 400 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	resp, _, err := h.Chat(ctx, "sess-orphan", "slow question")
+	if err != nil {
+		t.Fatalf("chat should complete despite caller cancel: %v", err)
+	}
+	if resp != "The answer is 42." {
+		t.Errorf("unexpected response: %q", resp)
+	}
+
+	msgs, err := st.GetChatMessages(context.Background(), "sess-orphan", 10)
+	if err != nil || len(msgs) != 2 {
+		t.Fatalf("expected user+assistant persisted, got %d err %v", len(msgs), err)
+	}
+	if msgs[0].Role != "user" || msgs[1].Role != "assistant" {
+		t.Errorf("unexpected roles: %s, %s", msgs[0].Role, msgs[1].Role)
+	}
+}
+
+// TestChatErrorPersistsErrorTurn verifies that a failed exchange is recorded
+// as an 'error' turn so a client that left mid-request sees the failure, and
+// that the error turn is not fed back to the LLM as history.
+func TestChatErrorPersistsErrorTurn(t *testing.T) {
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/chat", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "model exploded", http.StatusInternalServerError)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	identity := &models.NodeIdentity{ID: "node-a", Hostname: "host-a", BindAddr: ":9600"}
+	h := NewChatHandler(NewClient(srv.URL, "test-model"), NewToolExecutor(st, identity), st)
+
+	if _, _, err := h.Chat(context.Background(), "sess-err", "do something"); err == nil {
+		t.Fatal("expected chat to fail")
+	}
+
+	msgs, err := st.GetChatMessages(context.Background(), "sess-err", 10)
+	if err != nil || len(msgs) != 2 {
+		t.Fatalf("expected user+error persisted, got %d err %v", len(msgs), err)
+	}
+	if msgs[0].Role != "user" {
+		t.Errorf("first message role = %q, want user", msgs[0].Role)
+	}
+	if msgs[1].Role != "error" || !strings.Contains(msgs[1].Content, "500") {
+		t.Errorf("second message = %q/%q, want error turn mentioning 500", msgs[1].Role, msgs[1].Content)
 	}
 }
