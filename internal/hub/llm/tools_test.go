@@ -3,6 +3,9 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -433,5 +436,145 @@ func TestRememberAndRecall(t *testing.T) {
 		json.RawMessage(`{"hostname":"nonexistent"}`))
 	if !strings.Contains(res, "error") {
 		t.Errorf("expected error for unknown host: %s", res)
+	}
+}
+
+// newFakeSearXNG mimics a SearXNG instance with JSON format enabled and
+// records the raw query string of the last request.
+func newFakeSearXNG(t *testing.T, status int) (*httptest.Server, *string) {
+	t.Helper()
+	lastQuery := ""
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /search", func(w http.ResponseWriter, r *http.Request) {
+		lastQuery = r.URL.RawQuery
+		if status != http.StatusOK {
+			w.WriteHeader(status)
+			w.Write([]byte("rate limited"))
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"query": r.URL.Query().Get("q"),
+			"results": []map[string]string{
+				{"title": "nginx releases", "url": "https://github.com/nginx/nginx/releases", "content": "nginx-1.30.2 stable", "engine": "brave"},
+				{"title": "nginx news", "url": "https://nginx.org/", "content": "njs 1.9 released", "engine": "duckduckgo"},
+				{"title": "third hit", "url": "https://example.com/3", "content": "filler", "engine": "google"},
+			},
+			"answers": []string{"1.30.2"},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, &lastQuery
+}
+
+func TestWebSearchReturnsCompactResults(t *testing.T) {
+	e, _ := newTestExecutor(t)
+	srv, lastQuery := newFakeSearXNG(t, http.StatusOK)
+	e.SetSearchURL(srv.URL + "/")
+
+	out, err := e.Execute(context.Background(), "web_search", json.RawMessage(`{"query":"nginx latest stable","count":2}`))
+	if err != nil {
+		t.Fatalf("web_search: %v", err)
+	}
+	if !strings.Contains(out, "nginx-1.30.2 stable") || !strings.Contains(out, "https://nginx.org/") {
+		t.Errorf("results missing: %s", truncate(out, 300))
+	}
+	if strings.Contains(out, "third hit") {
+		t.Errorf("count param ignored: %s", out)
+	}
+	if strings.Contains(out, `"engine"`) && strings.Contains(out, "filler") {
+		t.Errorf("unexpected extra fields")
+	}
+	if !strings.Contains(*lastQuery, "format=json") || !strings.Contains(*lastQuery, "q=nginx") {
+		t.Errorf("upstream query wrong: %s", *lastQuery)
+	}
+	if !strings.Contains(out, "1.30.2") { // instant answer included
+		t.Errorf("answer missing: %s", truncate(out, 300))
+	}
+}
+
+func TestWebSearchNotConfigured(t *testing.T) {
+	e, _ := newTestExecutor(t)
+	out, err := e.Execute(context.Background(), "web_search", json.RawMessage(`{"query":"anything"}`))
+	if err != nil {
+		t.Fatalf("web_search: %v", err)
+	}
+	if !strings.Contains(out, "--searxng") {
+		t.Errorf("expected not-configured hint: %s", out)
+	}
+}
+
+func TestWebSearchUpstreamError(t *testing.T) {
+	e, _ := newTestExecutor(t)
+	srv, _ := newFakeSearXNG(t, http.StatusForbidden)
+	e.SetSearchURL(srv.URL)
+	out, err := e.Execute(context.Background(), "web_search", json.RawMessage(`{"query":"x"}`))
+	if err != nil {
+		t.Fatalf("web_search: %v", err)
+	}
+	if !strings.Contains(out, "403") || !strings.Contains(out, "rate limited") {
+		t.Errorf("upstream error not surfaced: %s", out)
+	}
+}
+
+func TestWebSearchEmptyQuery(t *testing.T) {
+	e, _ := newTestExecutor(t)
+	srv, _ := newFakeSearXNG(t, http.StatusOK)
+	e.SetSearchURL(srv.URL)
+	out, err := e.Execute(context.Background(), "web_search", json.RawMessage(`{"query":"   "}`))
+	if err != nil {
+		t.Fatalf("web_search: %v", err)
+	}
+	if !strings.Contains(out, "query is required") {
+		t.Errorf("empty query not rejected: %s", out)
+	}
+}
+
+// TestWebSearchLive exercises the executor against a real SearXNG instance.
+// Skipped unless HOMELABMON_SEARXNG_URL is set:
+//
+//	HOMELABMON_SEARXNG_URL=https://searxng.example.org go test -run TestWebSearchLive ./internal/hub/llm/
+func TestWebSearchLive(t *testing.T) {
+	url := os.Getenv("HOMELABMON_SEARXNG_URL")
+	if url == "" {
+		t.Skip("set HOMELABMON_SEARXNG_URL to run the live SearXNG test")
+	}
+	e, _ := newTestExecutor(t)
+	e.SetSearchURL(url)
+	out, err := e.Execute(context.Background(), "web_search",
+		json.RawMessage(`{"query":"nginx stable release notes","count":3}`))
+	if err != nil {
+		t.Fatalf("web_search: %v", err)
+	}
+	t.Logf("live result: %s", truncate(out, 800))
+	// The pipeline must always produce a well-formed response; result hits
+	// depend on the instance's upstream engines not being rate-limited.
+	if !strings.Contains(out, `"results"`) {
+		t.Errorf("malformed live response: %s", truncate(out, 300))
+	}
+	if !strings.Contains(out, `"url"`) {
+		t.Logf("instance returned no results (engines possibly suspended): %s", truncate(out, 300))
+	}
+}
+
+func TestWebSearchRateLimitedNote(t *testing.T) {
+	e, _ := newTestExecutor(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /search", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"results":              []map[string]string{},
+			"unresponsive_engines": [][]interface{}{{"brave", "Suspended: too many requests"}, {"duckduckgo", "timeout"}},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	e.SetSearchURL(srv.URL)
+
+	out, err := e.Execute(context.Background(), "web_search", json.RawMessage(`{"query":"x"}`))
+	if err != nil {
+		t.Fatalf("web_search: %v", err)
+	}
+	if !strings.Contains(out, "rate-limited") || !strings.Contains(out, "brave") {
+		t.Errorf("engine-status note missing: %s", out)
 	}
 }

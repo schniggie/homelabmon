@@ -72,6 +72,7 @@ func init() {
 	rootCmd.PersistentFlags().Int("retention-days", 7, "number of days to keep metric history (0 = forever)")
 	rootCmd.PersistentFlags().String("enroll-url", "", "URL of a CA node to enroll with (e.g., https://192.168.1.10:9600)")
 	rootCmd.PersistentFlags().String("enroll-token", "", "one-time enrollment token from the CA node")
+	rootCmd.PersistentFlags().String("searxng", "", "SearXNG instance URL for agent web search (JSON format must be enabled, e.g. https://searxng.example.org)")
 	rootCmd.PersistentFlags().String("site", "", "site label for multi-site federation (e.g., home, office, cloud)")
 
 	viper.BindPFlag("site", rootCmd.PersistentFlags().Lookup("site"))
@@ -94,6 +95,7 @@ func init() {
 	viper.BindPFlag("retention-days", rootCmd.PersistentFlags().Lookup("retention-days"))
 	viper.BindPFlag("enroll-url", rootCmd.PersistentFlags().Lookup("enroll-url"))
 	viper.BindPFlag("enroll-token", rootCmd.PersistentFlags().Lookup("enroll-token"))
+	viper.BindPFlag("searxng", rootCmd.PersistentFlags().Lookup("searxng"))
 }
 
 func runAgent(cmd *cobra.Command, args []string) error {
@@ -234,6 +236,10 @@ func runAgent(cmd *cobra.Command, args []string) error {
 	executor.SetDockerRouter(peerClient)
 	executor.SetExecRouter(peerClient)
 	executor.SetNotifier(dispatcher)
+	if searchURL := viper.GetString("searxng"); searchURL != "" {
+		executor.SetSearchURL(searchURL)
+		log.Info().Str("searxng", searchURL).Msg("agent web search enabled")
+	}
 	if llmURL := viper.GetString("llm"); llmURL != "" {
 		llmModel := viper.GetString("llm-model")
 		if llmModel == "" {

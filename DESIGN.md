@@ -136,6 +136,9 @@ Heartbeat every 60s. Bidirectional -- response includes peer's own heartbeat. Fa
 ## LLM Integration (Phase 4)
 
 Local Ollama with tool-calling. Activated via `--llm http://localhost:11434 --llm-model qwen2.5:7b`.
+Optionally, `--searxng https://your-searxng` (instance must have JSON format enabled) adds a
+`web_search` tool so the agent can pull external knowledge into its answers: current package
+versions, release notes, error solutions, documentation.
 
 The LLM is a full homelab agent: it can query the CMDB **and manage the platform**.
 Tool calls are routed to the node that owns the target (loopback for the local
@@ -152,6 +155,7 @@ list_docker_containers(hostname?)      -> containers with image, stack, health, 
 list_peers()                           -> mesh peers: address, status, version, site
 list_integrations()                    -> FRITZ!Box/Unifi/HA/Pi-hole/pfSense with sync status
 get_settings()                         -> thresholds, retention, scan interval, notification channels
+web_search(query, count?)              -> public internet via a SearXNG instance (--searxng), titles/URLs/snippets
 ```
 
 Management tools:

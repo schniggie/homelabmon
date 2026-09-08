@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +46,7 @@ type ToolExecutor struct {
 	execRouter ExecRouter
 	scanFunc   func() (int, error)
 	notifier   Notifier
+	searchURL  string // SearXNG instance (JSON format) for web_search; empty = disabled
 }
 
 func NewToolExecutor(s *store.Store, identity *models.NodeIdentity) *ToolExecutor {
@@ -61,6 +64,10 @@ func (e *ToolExecutor) SetScanFunc(f func() (int, error)) { e.scanFunc = f }
 
 // SetNotifier enables sending notifications.
 func (e *ToolExecutor) SetNotifier(n Notifier) { e.notifier = n }
+
+// SetSearchURL enables the web_search tool against a SearXNG instance whose
+// JSON format is enabled.
+func (e *ToolExecutor) SetSearchURL(url string) { e.searchURL = strings.TrimRight(url, "/") }
 
 const confirmHint = `"hint":"this action is destructive; ask the user to confirm, then call again with confirm=true"`
 
@@ -141,6 +148,14 @@ func ToolDefinitions() []Tool {
 				Name:        "get_settings",
 				Description: "Get the current platform settings: alert thresholds, retention, scan interval, notification channels, site label, and this node's identity.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: ToolFunction{
+				Name:        "web_search",
+				Description: "Search the public internet via SearXNG for knowledge the homelab data cannot provide: current package versions and release notes, error messages and their fixes, documentation, best practices. Returns result titles, URLs, and snippets. Use it before suggesting upgrades or whenever a task needs up-to-date or external information, and tell the user where the information came from.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"The web search query (e.g. 'nginx 1.30 release notes', 'docker no space left on device fix')"},"count":{"type":"integer","description":"Maximum number of results (default 5, max 10)"}},"required":["query"]}`),
 			},
 		},
 		// ---- Management tools ----
@@ -299,6 +314,8 @@ func (e *ToolExecutor) execute(ctx context.Context, name string, args json.RawMe
 		return e.listIntegrations(ctx)
 	case "get_settings":
 		return e.getSettings()
+	case "web_search":
+		return e.webSearch(ctx, args)
 	// Management tools
 	case "docker_control":
 		return e.dockerControl(ctx, args)
@@ -778,6 +795,117 @@ func (e *ToolExecutor) getSettings() (string, error) {
 }
 
 // ---------- management tools ----------
+
+// searchHTTPClient is separate from the mesh clients: SearXNG is an external
+// service with its own latency profile.
+var searchHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
+// webSearch queries the configured SearXNG instance (JSON format) and returns
+// compact hits: title, URL, snippet. Disabled unless --searxng is set.
+func (e *ToolExecutor) webSearch(ctx context.Context, args json.RawMessage) (string, error) {
+	if e.searchURL == "" {
+		return `{"error":"web search is not configured on this node (start with --searxng https://your-searxng; its JSON format must be enabled)"}`, nil
+	}
+	var params struct {
+		Query string `json:"query"`
+		Count int    `json:"count"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", err
+	}
+	params.Query = strings.TrimSpace(params.Query)
+	if params.Query == "" {
+		return `{"error":"query is required"}`, nil
+	}
+	if params.Count <= 0 {
+		params.Count = 5
+	}
+	if params.Count > 10 {
+		params.Count = 10
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.searchURL+"/search", nil)
+	if err != nil {
+		return fmt.Sprintf(`{"error":"%s"}`, err.Error()), nil
+	}
+	q := req.URL.Query()
+	q.Set("q", params.Query)
+	q.Set("format", "json")
+	req.URL.RawQuery = q.Encode()
+
+	resp, err := searchHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Sprintf(`{"error":"search request failed: %s"}`, err.Error()), nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
+		return fmt.Sprintf(`{"error":"search engine returned %d: %s"}`, resp.StatusCode, strings.TrimSpace(string(b))), nil
+	}
+
+	var payload struct {
+		Results []struct {
+			Title   string `json:"title"`
+			URL     string `json:"url"`
+			Content string `json:"content"`
+			Engine  string `json:"engine"`
+		} `json:"results"`
+		Answers      []string        `json:"answers"`
+		Unresponsive [][]interface{} `json:"unresponsive_engines"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return fmt.Sprintf(`{"error":"decode search response: %s"}`, err.Error()), nil
+	}
+
+	type hit struct {
+		Title   string `json:"title"`
+		URL     string `json:"url"`
+		Snippet string `json:"snippet"`
+		Engine  string `json:"engine,omitempty"`
+	}
+	out := make([]hit, 0, params.Count)
+	for _, r := range payload.Results {
+		if len(out) >= params.Count {
+			break
+		}
+		out = append(out, hit{
+			Title:   truncate(r.Title, 120),
+			URL:     r.URL,
+			Snippet: truncate(strings.TrimSpace(r.Content), 300),
+			Engine:  r.Engine,
+		})
+	}
+	result := map[string]interface{}{"query": params.Query, "results": out}
+	if len(payload.Answers) > 0 {
+		result["answer"] = truncate(strings.TrimSpace(payload.Answers[0]), 300)
+	}
+	if len(out) == 0 {
+		// SearXNG suspends engines that rate-limit it; tell the model why the
+		// result list is empty so it can report that instead of guessing.
+		if note := unresponsiveNote(payload.Unresponsive); note != "" {
+			result["note"] = note
+		} else {
+			result["note"] = "no results for this query"
+		}
+	}
+	return string(mustJSON(result)), nil
+}
+
+// unresponsiveNote summarizes which search engines are currently failing.
+func unresponsiveNote(entries [][]interface{}) string {
+	var names []string
+	for _, e := range entries {
+		if len(e) > 0 {
+			if s, ok := e[0].(string); ok {
+				names = append(names, s)
+			}
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return "no results: search engines currently unavailable or rate-limited (" + strings.Join(names, ", ") + "); retry shortly or rephrase"
+}
 
 func (e *ToolExecutor) dockerControl(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {

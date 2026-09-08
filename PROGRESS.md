@@ -16,6 +16,7 @@
 | 9 | Agent Memory & Chat History | `COMPLETE` | Persistent per-node memory (auto-recorded actions + agent notes), cross-session recall, persisted chat sessions with LLM-generated titles |
 | 10 | Diagnostics & Stability | `COMPLETE` | Debug API with event ring, fixed standalone-node self-host flapping and passive-device offline floods between scans |
 | 11 | Mesh Hardening, Chat UX & Memory Mgmt | `COMPLETE` | Enrollment fix, heartbeat batching, peer removal; rich markdown chat that survives navigation; per-chat auto-approve toggle; per-node memory view with user edit/delete |
+| 12 | Agent Web Search | `COMPLETE` | web_search tool backed by a SearXNG instance (--searxng): the agent can look up package versions, error solutions, and docs from the internet |
 
 ---
 
@@ -569,3 +570,16 @@ Root causes found by probing the live hub (proxmox1, standalone, 27 hosts):
 |------|----|---------|--------|---------|
 | proxmox1 (hub) | Linux (Proxmox, Docker) | https://192.168.178.199:9600 | Docker image built from source | docker compose (no `--exec`, deliberate) |
 | mac-studio | macOS (Apple Silicon) | 192.168.178.250 (first mesh node, also runs Ollama) | local build, ad-hoc codesigned | manual |
+
+---
+
+## Phase 12: Agent Web Search
+
+**Goal:** Let the agent fetch information from the Internet (current package versions, error messages and fixes, documentation) to fulfill tasks that homelab data alone cannot answer.
+
+- [x] `web_search` tool backed by the user's SearXNG instance: `--searxng https://your-searxng` (viper-bound flag, JSON format must be enabled on the instance); unset = tool returns a not-configured hint (pattern matches trigger_network_scan)
+- [x] Executor queries `<instance>/search?q=...&format=json` (15s client timeout), returns compact hits (title/URL/snippet/engine, snippets truncated to 300 chars, max 10) plus SearXNG instant answers when present
+- [x] Empty result sets carry a note explaining why -- including which upstream engines are suspended/rate-limited -- so the model reports the outage instead of guessing (behavior live-verified: the agent refused to invent a version number and offered alternatives)
+- [x] System prompt directs the agent to use web_search for external knowledge and cite sources
+- [x] Unit tests: parsing/compaction, count limiting, query encoding, not-configured, upstream error, empty-query, rate-limit note; env-gated live test (`HOMELABMON_SEARXNG_URL=... go test -run TestWebSearchLive ./internal/hub/llm/`)
+- [x] Live-verified against the real SearXNG instance and qwen3.8:27b-mlx (tool calls with sensible queries, graceful handling of a rate-limited instance; full end-to-end run pending the instance's engines staying unsuspended -- public-instance rate limits reset on their own)

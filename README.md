@@ -18,6 +18,7 @@ A single-binary, zero-dependency homelab discovery and monitoring system with me
 - **Network scanning** -- ARP, mDNS, SNMP discover passive devices (phones, TVs, IoT, printers)
 - **Integrations** -- FRITZ!Box, Unifi, Home Assistant, Pi-hole, pfSense API pulls
 - **LLM chat** -- local Ollama integration: "What's running on my NAS?"
+- **Web search for the agent** -- point it at your SearXNG instance (`--searxng`) and the agent can look up current package versions, error fixes, and documentation on the internet when a task needs it
 - **AI agent** -- the chat can also *manage* the homelab: start/stop/restart Docker containers on any node, run shell commands on Linux/Windows/macOS/FreeBSD nodes, trigger scans, send notifications, change settings, rename/remove devices, test/sync integrations, and add/remove mesh peers (with confirmation gates on every action, or flip the per-chat auto-approve toggle to let the agent act on its own)
 - **Agent memory** -- every management action is recorded per node; the agent recalls past actions and notes when working on a node again, and can store its own notes for future sessions; the same memory is shown on each host's page where you can correct or delete entries
 - **Chat history** -- conversations are persisted with LLM-generated titles and can be resumed from the sidebar's History panel; answers render as rich markdown (tables, lists, code blocks with copy buttons) and in-flight replies survive page navigation
@@ -281,6 +282,7 @@ homelabmon --ui --no-auth                     # + dashboard without login
 homelabmon --scan                             # + network scanning (ARP, mDNS)
 homelabmon --exec                             # + accept remote commands (agent + AI)
 homelabmon --llm http://localhost:11434       # + LLM chat (Ollama)
+homelabmon --searxng https://searx.example.org # + web search for the AI agent (SearXNG, JSON mode)
 homelabmon --peer 192.168.1.10:9600          # + connect to another node
 homelabmon --notify-ntfy https://ntfy.sh/x   # + push notifications
 homelabmon --retention-days 30               # keep 30 days of metrics (default: 7)
