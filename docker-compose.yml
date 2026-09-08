@@ -19,6 +19,8 @@ services:
     environment:
       - HOMELABMON_LLM=http://192.168.178.250:11434
       - HOMELABMON_LLM_MODEL=qwen3.8:27b-mlx
+      # SearXNG instance for the agent's web_search tool (JSON format must be enabled)
+      - HOMELABMON_SEARXNG=https://searxng.schnigg.ie/
       # More examples (all flags work as HOMELABMON_<FLAG> with - -> _):
       # - HOMELABMON_SITE=home
       # - HOMELABMON_NOTIFY_NTFY=https://ntfy.sh/my-topic
