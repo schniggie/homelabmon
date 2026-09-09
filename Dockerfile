@@ -16,7 +16,8 @@ RUN CGO_ENABLED=0 go build -ldflags "\
     -o /homelabmon .
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates
+# openssh-client: the AI agent's enroll_node tool deploys nodes over SSH
+RUN apk add --no-cache ca-certificates openssh-client
 COPY --from=builder /homelabmon /usr/local/bin/homelabmon
 VOLUME /data
 ENV HOME=/data

@@ -73,6 +73,7 @@ func init() {
 	rootCmd.PersistentFlags().String("enroll-url", "", "URL of a CA node to enroll with (e.g., https://192.168.1.10:9600)")
 	rootCmd.PersistentFlags().String("enroll-token", "", "one-time enrollment token from the CA node")
 	rootCmd.PersistentFlags().String("searxng", "", "SearXNG instance URL for agent web search (JSON format must be enabled, e.g. https://searxng.example.org)")
+	rootCmd.PersistentFlags().String("deploy-dist", "", "directory with prebuilt cross-platform binaries for enroll_node (default: <data-dir>/dist)")
 	rootCmd.PersistentFlags().String("site", "", "site label for multi-site federation (e.g., home, office, cloud)")
 
 	viper.BindPFlag("site", rootCmd.PersistentFlags().Lookup("site"))
@@ -96,6 +97,7 @@ func init() {
 	viper.BindPFlag("enroll-url", rootCmd.PersistentFlags().Lookup("enroll-url"))
 	viper.BindPFlag("enroll-token", rootCmd.PersistentFlags().Lookup("enroll-token"))
 	viper.BindPFlag("searxng", rootCmd.PersistentFlags().Lookup("searxng"))
+	viper.BindPFlag("deploy-dist", rootCmd.PersistentFlags().Lookup("deploy-dist"))
 }
 
 func runAgent(cmd *cobra.Command, args []string) error {
@@ -272,6 +274,7 @@ func runAgent(cmd *cobra.Command, args []string) error {
 		log.Warn().Msg("remote command execution ENABLED (--exec): anyone who can reach this port can run commands on this node -- use mTLS on untrusted networks")
 	}
 
+	tlsEnabled := false
 	pki := mesh.NewPKI(dir)
 	if pki.CAExists() {
 		if err := pki.Load(); err != nil {
@@ -279,9 +282,25 @@ func runAgent(cmd *cobra.Command, args []string) error {
 		} else {
 			transport.SetPKI(pki)
 			peerClient.SetTLSConfig(pki.ClientTLSConfig())
+			tlsEnabled = true
 			log.Info().Msg("mTLS enabled for mesh transport")
 		}
 	}
+
+	// Agent-driven enrollment (enroll_node): targets reach this hub on the
+	// bind port over TLS when this node is a CA; cross-arch binaries come
+	// from the dist directory.
+	bind := viper.GetString("bind")
+	port := "9600"
+	if i := strings.LastIndex(bind, ":"); i >= 0 && i < len(bind)-1 {
+		port = bind[i+1:]
+	}
+	executor.SetEnrollEndpoint(port, tlsEnabled)
+	distDir := viper.GetString("deploy-dist")
+	if distDir == "" {
+		distDir = filepath.Join(dir, "dist")
+	}
+	executor.SetDeployDistDir(distDir)
 
 	// 7b. Enrollment (if --enroll-url and --enroll-token are set)
 	enrollURL := viper.GetString("enroll-url")

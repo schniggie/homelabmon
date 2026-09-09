@@ -23,6 +23,7 @@ A single-binary, zero-dependency homelab discovery and monitoring system with me
 - **Agent memory** -- every management action is recorded per node; the agent recalls past actions and notes when working on a node again, and can store its own notes for future sessions; the same memory is shown on each host's page where you can correct or delete entries
 - **Chat history** -- conversations are persisted with LLM-generated titles and can be resumed from the sidebar's History panel; answers render as rich markdown (tables, lists, code blocks with copy buttons) and in-flight replies survive page navigation
 - **Remote commands** -- run devops commands on any node (package upgrades, service checks, logs) over the mesh; opt-in per node with `--exec`, full audit trail
+- **Chat-driven node enrollment** -- authorize the hub's SSH key on a target and just ask: the agent copies the binary over, enrolls with the hub CA, sets up the systemd service, and verifies the first heartbeat (per-node confirmation required, Linux/systemd targets)
 - **Lightweight CMDB** -- all devices in one SQLite database
 - **Notifications** -- ntfy.sh + webhook alerts for host offline / resource thresholds
 - **Secure credentials** -- AES-256-GCM encrypted secret store, no passwords in CLI or env
@@ -237,6 +238,27 @@ homelabmon --ui --exec          # this node accepts remote commands
 ```
 
 **Security**: remote execution is **off by default** and must be enabled per node. The AI agent must get your explicit confirmation for every command before executing it. Optionally, the chat header has an **auto-approve toggle** (bolt icon, per chat, off by default) that lets the agent run commands and disruptive actions on its own in that conversation -- it still announces what it runs, and everything stays in the exec-history audit trail. On untrusted networks, enable mTLS (see below) so the exec endpoint is only reachable by enrolled nodes -- without mTLS, anyone who can reach port 9600 can run commands on a `--exec` node.
+
+## Enrolling New Nodes
+
+Manual flow:
+
+```bash
+# On the hub (CA): generate a one-time token
+homelabmon setup --gen-token
+
+# On the new node: install the binary, then enroll and run
+homelabmon --enroll-url https://HUB_IP:9600 --enroll-token TOKEN
+```
+
+Or let the AI agent do it: authorize the hub's SSH public key on the target
+(`ssh-copy-id user@target`) and make sure the user has passwordless sudo, then
+ask in the chat -- *"Enroll node 192.168.178.50 as user dx"*. The agent copies
+the binary from the hub (cross-architecture binaries come from the
+`--deploy-dist` directory, the output of `make all`), enrolls with the hub CA,
+installs and starts the systemd service, and verifies the node's first
+heartbeat. Every enrollment requires your explicit confirmation in chat.
+Currently Linux targets are supported.
 
 ## FreeBSD / OPNsense
 

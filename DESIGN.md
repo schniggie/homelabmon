@@ -175,6 +175,7 @@ manage_integration(action, name, confirm?)                 -> test / sync / dele
 check_vendors()                                            -> re-resolve MAC OUI vendors
 add_peer(address)                                          -> connect a new node to the mesh
 remove_peer(address)                                       -> remove a mesh peer entry (live peers re-add via heartbeat)
+enroll_node(address, username, port?, site?, extra_args?, confirm) -> deploy the agent to a new Linux machine over SSH and join it to the mesh
 ```
 
 Remote execution (`--exec` per node, off by default): commands run in the node's
@@ -189,6 +190,16 @@ and every shell command carry a `confirm` parameter. The system prompt instructs
 the model to ask the user first and only pass `confirm=true` after explicit
 agreement; the executor enforces the gate independently of the model. Executed
 actions are shown as badges in the chat UI and logged.
+
+**Agent-driven enrollment:** with the hub's SSH public key authorized on a
+target (and the target user having passwordless sudo), the agent can enroll
+new nodes from chat: `enroll_node` copies the binary from the hub (its own
+binary, or `homelabmon-<os>-<arch>` from `--deploy-dist`, the `make all`
+output), runs the one-shot `homelabmon enroll` (fresh one-time token delivered
+over SSH stdin), installs and starts a systemd service, and verifies the
+node's first heartbeat reached the hub. Enrollment is the one tool that is
+never auto-approved -- even with the toggle on, every node needs explicit
+confirmation.
 
 **Per-chat auto-approve:** the chat header has a bolt toggle (off by default,
 per session, persisted in `chat_sessions.auto_approve`). When enabled, an

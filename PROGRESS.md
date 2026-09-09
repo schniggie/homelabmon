@@ -17,6 +17,7 @@
 | 10 | Diagnostics & Stability | `COMPLETE` | Debug API with event ring, fixed standalone-node self-host flapping and passive-device offline floods between scans |
 | 11 | Mesh Hardening, Chat UX & Memory Mgmt | `COMPLETE` | Enrollment fix, heartbeat batching, peer removal; rich markdown chat that survives navigation; per-chat auto-approve toggle; per-node memory view with user edit/delete |
 | 12 | Agent Web Search | `COMPLETE` | web_search tool backed by a SearXNG instance (--searxng): the agent can look up package versions, error solutions, and docs from the internet |
+| 13 | Agent-Driven Enrollment | `COMPLETE` | enroll_node tool: chat-driven node deployment over SSH (binary from hub, one-time CA enrollment, systemd service, heartbeat verification), always confirm-gated |
 
 ---
 
@@ -495,6 +496,21 @@ Root causes found by probing the live hub (proxmox1, standalone, 27 hosts):
 
 ---
 
+## Phase 13: Agent-Driven Enrollment
+
+**Goal:** "Enroll new node on 192.168.178.x" in chat: the agent generates the enrollment token, deploys the binary to the target over SSH (using the hub's authorized SSH key), enrolls it with the hub CA, installs a systemd service, and verifies the first heartbeat -- replacing the manual gen-token/scp/start ritual.
+
+- [x] New one-shot subcommand `homelabmon enroll --enroll-url ... --enroll-token -` (token read from stdin, so it never appears in argv, shell history, or a world-readable unit file); adds the CA node as first peer so heartbeats have a destination
+- [x] `enroll_node` agent tool (26 tools total): detect target OS/arch via SSH, copy the binary from the hub (hub's own binary for same platform, `homelabmon-<os>-<arch>` from the dist directory otherwise), one-time CA enrollment (fresh token stored hub-side, delivered via SSH stdin), systemd service install + start, then poll the hub store up to 90s for the node's first heartbeat and report verified/not
+- [x] Binary distribution without GitHub releases: hub's own static binary for its platform; `--deploy-dist` flag (default `<data-dir>/dist`, the `make all` output) for cross-architecture targets, with actionable guidance when a platform binary is missing
+- [x] Always confirm-gated: `enroll_node` is deliberately NOT in the auto-approve injection set (unit-tested) -- every enrollment names target + SSH user and needs explicit approval, even in auto-approve mode; system prompt safety rule added
+- [x] Dockerfile: runtime image gains `openssh-client` (the hub container previously had no SSH client)
+- [x] Enrollments are auto-recorded in node memory; systemd unit pins `User=root` + `Environment=HOME=/root` so the service resolves the same data dir as the enroll step (live-tested bug: systemd sets no HOME for root services, the service otherwise misses the certs and joins without mTLS)
+- [x] Tests: fake SSH runner drives the full orchestration (command shapes, stdin token delivery, unit content, memory record); confirmation gate, no-auto-approve, unsupported OS, missing cross-arch binary, ssh failure, deployed-but-unverified
+- [x] Live-verified end-to-end: real sshd target enrolled via chat on an mTLS hub -- binary deployed, CA enrollment over TLS, service installed, first heartbeat verified within the chat turn
+
+---
+
 ## Decision Log
 
 | Date | Decision | Rationale |
@@ -561,6 +577,9 @@ Root causes found by probing the live hub (proxmox1, standalone, 27 hosts):
 | 2026-09-06 | Failed exchanges persist as 'error' turns | A returning page must see the failure instead of waiting forever; error turns are excluded from LLM history |
 | 2026-09-07 | Auto-approve is per-chat, opt-in, prompt + injection | Convenience without weakening the default: executor gate stays, new chats default off, audit trail unchanged |
 | 2026-09-07 | Users edit memory title/detail only | Content is user-correctable; kind/scope/source stay system-owned so recall semantics don't drift |
+| 2026-09-09 | enroll_node is never auto-approved | Enrolling a node expands the mesh's trust boundary; it stays explicitly confirmed even in auto-approve sessions |
+| 2026-09-09 | Enrollment token via SSH stdin, one-shot `enroll` subcommand | Keeps the token out of argv (ps), shell history, and service files; certs persist so the service runs without enrollment flags |
+| 2026-09-09 | Binaries copied from the hub (self + dist dir), not GitHub releases | No releases published yet; the hub's static binary covers its own platform, `make all` dist output covers cross-arch targets |
 
 ---
 

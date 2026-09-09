@@ -5,7 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -39,14 +44,35 @@ type Notifier interface {
 
 // ToolExecutor executes tool calls against the platform: CMDB queries,
 // settings, notifications, scans, and management actions on any mesh node.
+// commandRunner shells out to local commands on the hub (ssh for enroll_node).
+// An interface so the enrollment orchestration is unit-testable.
+type commandRunner interface {
+	Run(ctx context.Context, stdin string, name string, args ...string) (string, error)
+}
+
+type execRunner struct{}
+
+func (execRunner) Run(ctx context.Context, stdin string, name string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 type ToolExecutor struct {
-	store      *store.Store
-	identity   *models.NodeIdentity
-	docker     DockerRouter
-	execRouter ExecRouter
-	scanFunc   func() (int, error)
-	notifier   Notifier
-	searchURL  string // SearXNG instance (JSON format) for web_search; empty = disabled
+	store         *store.Store
+	identity      *models.NodeIdentity
+	docker        DockerRouter
+	execRouter    ExecRouter
+	scanFunc      func() (int, error)
+	notifier      Notifier
+	searchURL     string // SearXNG instance (JSON format) for web_search; empty = disabled
+	runner        commandRunner
+	enrollPort    string // port targets use to reach this hub for enrollment
+	enrollTLS     bool   // whether this hub serves enrollment over TLS (CA installed)
+	deployDistDir string // prebuilt cross-platform binaries (make all output)
 }
 
 func NewToolExecutor(s *store.Store, identity *models.NodeIdentity) *ToolExecutor {
@@ -68,6 +94,16 @@ func (e *ToolExecutor) SetNotifier(n Notifier) { e.notifier = n }
 // SetSearchURL enables the web_search tool against a SearXNG instance whose
 // JSON format is enabled.
 func (e *ToolExecutor) SetSearchURL(url string) { e.searchURL = strings.TrimRight(url, "/") }
+
+// SetEnrollEndpoint tells enroll_node how deployed targets reach this hub.
+func (e *ToolExecutor) SetEnrollEndpoint(port string, tls bool) {
+	e.enrollPort = strings.Trim(port, ":")
+	e.enrollTLS = tls
+}
+
+// SetDeployDistDir points enroll_node at prebuilt cross-platform binaries
+// (the output of `make all`: homelabmon-<os>-<arch>).
+func (e *ToolExecutor) SetDeployDistDir(dir string) { e.deployDistDir = dir }
 
 const confirmHint = `"hint":"this action is destructive; ask the user to confirm, then call again with confirm=true"`
 
@@ -250,6 +286,14 @@ func ToolDefinitions() []Tool {
 		{
 			Type: "function",
 			Function: ToolFunction{
+				Name:        "enroll_node",
+				Description: "Deploy the homelabmon agent to a new Linux machine over SSH and join it to the mesh: copies the binary from this hub, runs one-time CA enrollment, installs and starts a systemd service, and verifies the node's first heartbeat arrived. Requires that this hub's SSH public key is already authorized on the target for the given user, and that the user has passwordless sudo (or is root). Use when the user asks to add or enroll a new node. State the target address and SSH user, then get explicit user approval for EVERY node before calling with confirm=true.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"address":{"type":"string","description":"Target IP or hostname (e.g. 192.168.178.50)"},"username":{"type":"string","description":"SSH user on the target (root or a user with passwordless sudo)"},"port":{"type":"integer","description":"SSH port (default 22)"},"site":{"type":"string","description":"Optional site label for multi-site federation"},"extra_args":{"type":"string","description":"Extra flags for the target's service (space separated), e.g. --scan or --exec"},"confirm":{"type":"boolean","description":"Must be true, and only after the user explicitly approved enrolling this exact node"}},"required":["address","username","confirm"]}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: ToolFunction{
 				Name:        "run_command",
 				Description: "Run a shell command on any agent node in the mesh (Linux, Windows, macOS, FreeBSD/OPNsense) and get stdout, stderr, and the exit code. Linux/macOS/BSD run /bin/sh; Windows runs cmd.exe (shell=\"powershell\" for PowerShell). Requires explicit user confirmation for EVERY command: show the exact command and target host first. Use for devops tasks: package upgrades, service checks, logs, config inspection.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"The shell command to run"},"hostname":{"type":"string","description":"Target host (optional, defaults to the local node). For fleet-wide tasks, call this once per host."},"shell":{"type":"string","description":"Windows only: cmd (default) or powershell","enum":["cmd","powershell"]},"timeout_seconds":{"type":"integer","description":"Timeout in seconds (default 120, max 600; use higher for upgrades)"},"confirm":{"type":"boolean","description":"Must be true, and only after the user explicitly approved the exact command"}},"required":["command","confirm"]}`),
@@ -339,6 +383,8 @@ func (e *ToolExecutor) execute(ctx context.Context, name string, args json.RawMe
 		return e.addPeer(ctx, args)
 	case "remove_peer":
 		return e.removePeer(ctx, args)
+	case "enroll_node":
+		return e.enrollNode(ctx, args)
 	case "run_command":
 		return e.runCommand(ctx, args)
 	case "list_exec_history":
@@ -1410,6 +1456,260 @@ func (e *ToolExecutor) removePeer(ctx context.Context, args json.RawMessage) (st
 	})), nil
 }
 
+// Poll cadence for enroll_node's heartbeat verification. Package vars so
+// tests can shorten them.
+var (
+	enrollPollInterval = 5 * time.Second
+	enrollPollMax      = 90 * time.Second
+)
+
+// enrollNode deploys the agent to a new Linux machine over SSH: copy binary
+// from this hub, one-time CA enrollment (token via stdin, never argv),
+// systemd service, then verify the first heartbeat reached this hub.
+// NOT auto-approvable: confirm=true is only accepted from an explicit user
+// approval, even in auto-approve sessions.
+func (e *ToolExecutor) enrollNode(ctx context.Context, args json.RawMessage) (string, error) {
+	var params struct {
+		Address   string `json:"address"`
+		Username  string `json:"username"`
+		Port      int    `json:"port"`
+		Site      string `json:"site"`
+		ExtraArgs string `json:"extra_args"`
+		Confirm   bool   `json:"confirm"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", err
+	}
+	params.Address = strings.TrimSpace(params.Address)
+	params.Username = strings.TrimSpace(params.Username)
+	if params.Address == "" || params.Username == "" {
+		return `{"error":"address and username are required"}`, nil
+	}
+	if !params.Confirm {
+		return fmt.Sprintf(`{"error":"confirmation required for enrolling %s as SSH user %s (installs binary + systemd service on the target)",%s}`,
+			params.Address, params.Username, confirmHint), nil
+	}
+	if e.enrollPort == "" {
+		return `{"error":"enrollment is not available on this node (no hub endpoint configured)"}`, nil
+	}
+
+	runner := e.runner
+	if runner == nil {
+		runner = execRunner{}
+	}
+
+	// Snapshot agent hosts so the verification step can spot the new one.
+	hostsBefore, _ := e.store.ListHosts(ctx)
+	before := map[string]bool{}
+	for _, h := range hostsBefore {
+		if h.MonitorType == "agent" {
+			before[h.ID] = true
+		}
+	}
+
+	sshPort := 22
+	if params.Port > 0 {
+		sshPort = params.Port
+	}
+	sshBase := []string{
+		"-o", "BatchMode=yes",
+		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "ConnectTimeout=5",
+		"-p", strconv.Itoa(sshPort),
+		params.Username + "@" + params.Address,
+	}
+	run := func(stdin, remote string) (string, error) {
+		return runner.Run(ctx, stdin, "ssh", append(append([]string{}, sshBase...), remote)...)
+	}
+	fail := func(step, out string, err error) string {
+		msg := strings.TrimSpace(out)
+		if msg == "" {
+			msg = err.Error()
+		}
+		return fmt.Sprintf(`{"error":"enroll_node failed at %q: %s"}`, step, truncate(msg, 400))
+	}
+
+	// 1. Detect target platform
+	out, err := run("", "uname -s && uname -m")
+	if err != nil {
+		return fail("ssh platform detection (is the hub's key authorized on the target?)", out, err), nil
+	}
+	goos, arch, perr := parseUname(out)
+	if perr != "" {
+		return `{"error":"` + perr + `"}`, nil
+	}
+	if goos != "linux" {
+		return fmt.Sprintf(`{"error":"target runs %s; only Linux targets are supported currently"}`, goos), nil
+	}
+
+	// 2. Resolve the binary for the target platform
+	binPath, berr := e.resolveDeployBinary(goos, arch)
+	if berr != nil {
+		return fmt.Sprintf(`{"error":"%s"}`, berr.Error()), nil
+	}
+
+	// 3. Upload and install the binary
+	bin, err := os.ReadFile(binPath)
+	if err != nil {
+		return fmt.Sprintf(`{"error":"read binary: %s"}`, err.Error()), nil
+	}
+	out, err = run(string(bin), "cat > /tmp/homelabmon.deploy && chmod 755 /tmp/homelabmon.deploy")
+	if err != nil {
+		return fail("binary upload", out, err), nil
+	}
+	out, err = run("", "sudo install -m 755 /tmp/homelabmon.deploy /usr/local/bin/homelabmon && rm -f /tmp/homelabmon.deploy")
+	if err != nil {
+		return fail("binary install (needs passwordless sudo)", out, err), nil
+	}
+
+	// 4. One-time enrollment; fresh token stored on the hub, passed via stdin
+	token := mesh.GenerateEnrollToken()
+	if err := e.store.SetSetting(ctx, "enroll-token", token); err != nil {
+		return fmt.Sprintf(`{"error":"store enrollment token: %s"}`, err.Error()), nil
+	}
+	enrollURL, uerr := e.enrollURLFor(params.Address)
+	if uerr != nil {
+		return fmt.Sprintf(`{"error":"determine hub address: %s"}`, uerr.Error()), nil
+	}
+	out, err = run(token, fmt.Sprintf("sudo /usr/local/bin/homelabmon enroll --enroll-url %s --enroll-token -", shellQuote(enrollURL)))
+	if err != nil {
+		return fail("CA enrollment", out, err), nil
+	}
+
+	// 5. Install and start the systemd service (no enrollment flags: certs persist)
+	out, err = run(enrollSystemdUnit(params.Site, params.ExtraArgs),
+		"sudo tee /etc/systemd/system/homelabmon.service > /dev/null && sudo systemctl daemon-reload && sudo systemctl enable --now homelabmon")
+	if err != nil {
+		return fail("systemd service install", out, err), nil
+	}
+
+	// 6. Verify the first heartbeat arrived at this hub
+	deadline := time.Now().Add(enrollPollMax)
+	for {
+		hosts, herr := e.store.ListHosts(ctx)
+		if herr == nil {
+			for _, h := range hosts {
+				if h.MonitorType == "agent" && !before[h.ID] {
+					return string(mustJSON(map[string]interface{}{
+						"ok":       true,
+						"enrolled": params.Address,
+						"hostname": h.Hostname,
+						"os":       goos + "/" + arch,
+						"service":  "homelabmon (systemd)",
+						"verified": true,
+						"note":     "first heartbeat received; node is part of the mesh",
+					})), nil
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return string(mustJSON(map[string]interface{}{
+				"ok":       true,
+				"enrolled": params.Address,
+				"os":       goos + "/" + arch,
+				"service":  "homelabmon (systemd)",
+				"verified": false,
+				"note":     "deployed and service started, but no heartbeat reached this hub within 90s - check 'systemctl status homelabmon' on the target",
+			})), nil
+		}
+		select {
+		case <-ctx.Done():
+			return `{"error":"verification interrupted"}`, nil
+		case <-time.After(enrollPollInterval):
+		}
+	}
+}
+
+// parseUname maps `uname -s && uname -m` output to GOOS/GOARCH-style names.
+func parseUname(out string) (goos, arch, errMsg string) {
+	lines := strings.Fields(strings.TrimSpace(out))
+	if len(lines) < 2 {
+		return "", "", "unexpected uname output: " + truncate(out, 80)
+	}
+	osName, mach := strings.ToLower(lines[0]), strings.ToLower(lines[1])
+	switch mach {
+	case "x86_64", "amd64":
+		arch = "amd64"
+	case "aarch64", "arm64":
+		arch = "arm64"
+	case "armv7l", "armv6l", "armhf":
+		arch = "arm"
+	default:
+		return "", "", "unsupported target architecture: " + mach
+	}
+	return osName, arch, ""
+}
+
+// resolveDeployBinary finds a binary for the target platform: the hub's own
+// binary when the platform matches, otherwise a prebuilt file from the dist
+// directory (make all output).
+func (e *ToolExecutor) resolveDeployBinary(goos, arch string) (string, error) {
+	if runtime.GOOS == goos && runtime.GOARCH == arch {
+		if self, err := os.Executable(); err == nil {
+			return self, nil
+		}
+	}
+	if e.deployDistDir != "" {
+		p := filepath.Join(e.deployDistDir, "homelabmon-"+goos+"-"+arch)
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("no binary for %s/%s available on this hub (itself: %s/%s); build it with 'make' and copy dist/homelabmon-%s-%s into the dist directory",
+		goos, arch, runtime.GOOS, runtime.GOARCH, goos, arch)
+}
+
+// enrollURLFor derives the enroll URL targets should use: the hub's source
+// address for reaching the target (UDP dial - no packets are sent) plus its
+// configured port.
+func (e *ToolExecutor) enrollURLFor(target string) (string, error) {
+	conn, err := net.Dial("udp", net.JoinHostPort(target, "22"))
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	ip := conn.LocalAddr().(*net.UDPAddr).IP.String()
+	scheme := "http"
+	if e.enrollTLS {
+		scheme = "https"
+	}
+	return scheme + "://" + net.JoinHostPort(ip, e.enrollPort), nil
+}
+
+// enrollSystemdUnit renders the target's systemd unit. No enrollment flags:
+// certs persist, so the service runs clean from the start.
+func enrollSystemdUnit(site, extraArgs string) string {
+	execStart := "/usr/local/bin/homelabmon --ui --scan"
+	if s := strings.TrimSpace(site); s != "" {
+		execStart += " --site " + shellQuote(s)
+	}
+	if extra := strings.TrimSpace(extraArgs); extra != "" {
+		execStart += " " + extra
+	}
+	return `[Unit]
+Description=HomelabMon monitoring agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=` + execStart + `
+Restart=on-failure
+RestartSec=5
+User=root
+Environment=HOME=/root
+AmbientCapabilities=CAP_NET_RAW
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+`
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'`) + "'"
+}
+
 // runCommand executes a shell command on a mesh node. Every command requires
 // explicit confirmation; results are recorded in the exec history.
 func (e *ToolExecutor) runCommand(ctx context.Context, args json.RawMessage) (string, error) {
@@ -1542,6 +1842,7 @@ var managementTools = map[string]bool{
 	"update_settings": true, "rename_host": true, "set_device_type": true,
 	"delete_host": true, "manage_integration": true, "check_vendors": true,
 	"add_peer": true, "run_command": true, "remove_peer": true,
+	"enroll_node": true,
 }
 
 func isManagementTool(name string) bool { return managementTools[name] }
@@ -1558,6 +1859,7 @@ func (e *ToolExecutor) recordActionMemory(ctx context.Context, name string, args
 		NewName    string `json:"new_name"`
 		DeviceType string `json:"device_type"`
 		Address    string `json:"address"`
+		Username   string `json:"username"`
 		Title      string `json:"title"`
 	}
 	json.Unmarshal(args, &p)
@@ -1603,6 +1905,8 @@ func (e *ToolExecutor) recordActionMemory(ctx context.Context, name string, args
 		title = fmt.Sprintf("Added mesh peer %s", p.Address)
 	case "remove_peer":
 		title = fmt.Sprintf("Removed mesh peer %s", p.Address)
+	case "enroll_node":
+		title = fmt.Sprintf("Enrolled node %s (SSH user %s)", p.Address, firstOr(p.Username, "?"))
 	case "send_notification":
 		title = fmt.Sprintf("Sent notification: %s", p.Title)
 	case "update_settings":
