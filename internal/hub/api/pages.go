@@ -505,15 +505,20 @@ func (u *UIServer) handleLLMStatus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"connected": connected,
 		"model":     model,
-		"enabled":   u.chatHandler != nil,
+		"enabled":   u.getChatHandler() != nil,
 	})
 }
 
 func (u *UIServer) handleLLMChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	if u.chatHandler == nil {
-		json.NewEncoder(w).Encode(map[string]string{"error": "LLM not configured. Start with --llm http://localhost:11434"})
+	handler := u.getChatHandler()
+	if handler == nil {
+		if u.llmClient != nil {
+			json.NewEncoder(w).Encode(map[string]string{"error": "Ollama (" + u.llmClient.BaseURL() + ") was unreachable when the hub started - it keeps retrying in the background; this works again once Ollama answers"})
+		} else {
+			json.NewEncoder(w).Encode(map[string]string{"error": "LLM not configured. Start with --llm http://localhost:11434"})
+		}
 		return
 	}
 
@@ -533,7 +538,7 @@ func (u *UIServer) handleLLMChat(w http.ResponseWriter, r *http.Request) {
 		req.SessionID = "default"
 	}
 
-	response, actions, err := u.chatHandler.Chat(r.Context(), req.SessionID, req.Message)
+	response, actions, err := handler.Chat(r.Context(), req.SessionID, req.Message)
 	if err != nil {
 		log.Error().Err(err).Msg("LLM chat error")
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -549,7 +554,8 @@ func (u *UIServer) handleLLMChat(w http.ResponseWriter, r *http.Request) {
 func (u *UIServer) handleLLMClear(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	if u.chatHandler == nil {
+	handler := u.getChatHandler()
+	if handler == nil {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		return
 	}
@@ -562,7 +568,7 @@ func (u *UIServer) handleLLMClear(w http.ResponseWriter, r *http.Request) {
 		req.SessionID = "default"
 	}
 
-	u.chatHandler.ClearSession(req.SessionID)
+	handler.ClearSession(req.SessionID)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 

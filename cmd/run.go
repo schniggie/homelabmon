@@ -249,7 +249,7 @@ func runAgent(cmd *cobra.Command, args []string) error {
 		}
 		llmClient = llm.NewClient(llmURL, llmModel)
 		if err := llmClient.Ping(ctx); err != nil {
-			log.Warn().Err(err).Str("url", llmURL).Msg("Ollama not reachable, chat disabled")
+			log.Warn().Err(err).Str("url", llmURL).Msg("Ollama not reachable at startup - retrying every 30s, chat enables automatically when it answers")
 		} else {
 			chatHandler = llm.NewChatHandler(llmClient, executor, st)
 			log.Info().Str("url", llmURL).Str("model", llmModel).Msg("LLM agent enabled (full platform tool access)")
@@ -340,6 +340,29 @@ func runAgent(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("create UI server: %w", err)
 		}
 		uiServer.PeerClient = peerClient
+
+		// If Ollama was unreachable at startup, retry in the background and
+		// enable chat as soon as it answers - no hub restart required.
+		if chatHandler == nil && llmClient != nil {
+			go func() {
+				ticker := time.NewTicker(30 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						if err := llmClient.Ping(ctx); err != nil {
+							continue
+						}
+						uiServer.SetChatHandler(llm.NewChatHandler(llmClient, executor, st))
+						log.Info().Str("url", viper.GetString("llm")).Msg("Ollama reachable - chat enabled")
+						return
+					}
+				}
+			}()
+		}
+
 		if scanEnabled {
 			scanOnce := func() (int, error) {
 				count := runNetworkScan(ctx, arpScanner, mdnsScanner, st)

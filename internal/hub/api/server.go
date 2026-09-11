@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"math"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/dx111ge/homelabmon/internal/agent"
@@ -28,6 +29,7 @@ type UIServer struct {
 	scanEnabled  bool
 	ScanFunc     func() (int, error) // triggers a network scan, returns device count
 	PeerClient   *mesh.PeerClient    // routes management calls to the owning mesh node
+	chatMu       sync.RWMutex // guards chatHandler (enabled after startup when Ollama returns)
 	chatHandler  *llm.ChatHandler
 	llmClient    *llm.Client
 	dashTmpl     *template.Template
@@ -36,6 +38,20 @@ type UIServer struct {
 	devsTmpl     *template.Template
 	settingsTmpl *template.Template
 	loginTmpl    *template.Template
+}
+
+// SetChatHandler enables (or replaces) the chat handler after startup, e.g.
+// when Ollama comes back after the hub started without it.
+func (u *UIServer) SetChatHandler(h *llm.ChatHandler) {
+	u.chatMu.Lock()
+	defer u.chatMu.Unlock()
+	u.chatHandler = h
+}
+
+func (u *UIServer) getChatHandler() *llm.ChatHandler {
+	u.chatMu.RLock()
+	defer u.chatMu.RUnlock()
+	return u.chatHandler
 }
 
 func NewUIServer(s *store.Store, collector *agent.Collector, identity *models.NodeIdentity, scanEnabled bool, dispatcher *notify.Dispatcher, chatHandler *llm.ChatHandler, llmClient *llm.Client, auth *AuthManager) (*UIServer, error) {
