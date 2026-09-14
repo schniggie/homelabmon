@@ -21,6 +21,8 @@ services:
       - HOMELABMON_LLM_MODEL=qwen3.8:27b-mlx
       # SearXNG instance for the agent's web_search tool (JSON format must be enabled)
       - HOMELABMON_SEARXNG=https://searxng.schnigg.ie/
+      # Deploy key for the agent's enroll_node tool (lives on the persistent volume)
+      - HOMELABMON_SSH_KEY=/data/.ssh/id_ed25519
       # More examples (all flags work as HOMELABMON_<FLAG> with - -> _):
       # - HOMELABMON_SITE=home
       # - HOMELABMON_NOTIFY_NTFY=https://ntfy.sh/my-topic
