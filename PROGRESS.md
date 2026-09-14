@@ -509,6 +509,7 @@ Root causes found by probing the live hub (proxmox1, standalone, 27 hosts):
 - [x] Tests: fake SSH runner drives the full orchestration (command shapes, stdin token delivery, unit content, memory record); confirmation gate, no-auto-approve, unsupported OS, missing cross-arch binary, ssh failure, deployed-but-unverified
 - [x] Live-verified end-to-end: real sshd target enrolled via chat on an mTLS hub -- binary deployed, CA enrollment over TLS, service installed, first heartbeat verified within the chat turn
 - [x] Auth-failure self-diagnostics + `--ssh-key` (field report from prod: key present on target but hub auth failed): SSH "Permission denied" failures now carry a hint describing the hub's identity files (paths, permissions, full public-key lines) so the model compares against the target's authorized_keys instead of guessing; `--ssh-key` sets an explicit deploy key (ssh -i, IdentitiesOnly); env-gated live test (HOMELABMON_ENROLL_SSH_REFUSAL=user@host:port)
+- [x] Field-report fix: on first contact ssh prints "Warning: Permanently added ..." into the combined output, which parseUname read as the uname result ("unsupported target architecture: permanently") -- client noise suppressed via LogLevel=ERROR and the parser now scans for the known-OS field; compose mounts ./dist read-only at /data/dist so cross-arch binaries from `make all` are visible to the hub container
 
 ---
 

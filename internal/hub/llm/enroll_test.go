@@ -329,3 +329,28 @@ func TestEnrollNodeLiveSSHAuthFailure(t *testing.T) {
 		t.Errorf("expected Permission denied with auth hint, got: %s", truncate(out, 400))
 	}
 }
+
+// TestParseUnameIgnoresSSHWarnings covers the field-reported bug: on first
+// contact ssh prints "Warning: Permanently added ..." into the combined
+// output, which must not be mistaken for the uname result.
+func TestParseUnameIgnoresSSHWarnings(t *testing.T) {
+	out := "Warning: Permanently added '192.168.178.211' (ED25519) to the list of known hosts.\nLinux\nx86_64\n"
+	goos, arch, errMsg := parseUname(out)
+	if errMsg != "" || goos != "linux" || arch != "amd64" {
+		t.Fatalf("warning polluted parse: goos=%q arch=%q err=%q", goos, arch, errMsg)
+	}
+
+	// unsupported arch is still detected correctly behind a warning
+	out = "Warning: Permanently added 'h' (ED25519) to the list of known hosts.\nLinux\nsparc64\n"
+	if _, _, errMsg = parseUname(out); errMsg == "" || !strings.Contains(errMsg, "sparc64") {
+		t.Errorf("unsupported arch not surfaced: %q", errMsg)
+	}
+
+	// unsupported OS behind a warning
+	out = "Warning: Permanently added 'h' (ED25519) to the list of known hosts.\nSunOS\nx86_64\n"
+	_, _, errMsg = parseUname(out)
+	// SunOS is a known OS keyword, so the arch parses; enrollNode rejects non-linux
+	if errMsg != "" {
+		t.Errorf("SunOS+x86_64 should parse: %q", errMsg)
+	}
+}

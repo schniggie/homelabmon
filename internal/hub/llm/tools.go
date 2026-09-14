@@ -1520,6 +1520,9 @@ func (e *ToolExecutor) enrollNode(ctx context.Context, args json.RawMessage) (st
 	sshBase := []string{
 		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=accept-new",
+		// ERROR level keeps the client's known_hosts chatter ("Warning:
+		// Permanently added ...") out of the combined output
+		"-o", "LogLevel=ERROR",
 		"-o", "ConnectTimeout=5",
 		"-p", strconv.Itoa(sshPort),
 	}
@@ -1640,23 +1643,29 @@ func (e *ToolExecutor) enrollNode(ctx context.Context, args json.RawMessage) (st
 }
 
 // parseUname maps `uname -s && uname -m` output to GOOS/GOARCH-style names.
+// Scans for the known-OS field rather than assuming output shape: ssh mixes
+// its own stderr (e.g. known_hosts warnings) into the combined output.
 func parseUname(out string) (goos, arch, errMsg string) {
-	lines := strings.Fields(strings.TrimSpace(out))
-	if len(lines) < 2 {
-		return "", "", "unexpected uname output: " + truncate(out, 80)
+	fields := strings.Fields(strings.ToLower(out))
+	for i, f := range fields {
+		switch f {
+		case "linux", "darwin", "freebsd", "openbsd", "netbsd", "sunos":
+			if i+1 >= len(fields) {
+				return "", "", "unexpected uname output: " + truncate(out, 80)
+			}
+			switch fields[i+1] {
+			case "x86_64", "amd64":
+				return f, "amd64", ""
+			case "aarch64", "arm64":
+				return f, "arm64", ""
+			case "armv7l", "armv6l", "armhf":
+				return f, "arm", ""
+			default:
+				return "", "", "unsupported target architecture: " + fields[i+1]
+			}
+		}
 	}
-	osName, mach := strings.ToLower(lines[0]), strings.ToLower(lines[1])
-	switch mach {
-	case "x86_64", "amd64":
-		arch = "amd64"
-	case "aarch64", "arm64":
-		arch = "arm64"
-	case "armv7l", "armv6l", "armhf":
-		arch = "arm"
-	default:
-		return "", "", "unsupported target architecture: " + mach
-	}
-	return osName, arch, ""
+	return "", "", "unexpected uname output (no OS found): " + truncate(out, 80)
 }
 
 // resolveDeployBinary finds a binary for the target platform: the hub's own
