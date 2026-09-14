@@ -251,13 +251,17 @@ homelabmon setup --gen-token
 homelabmon --enroll-url https://HUB_IP:9600 --enroll-token TOKEN
 ```
 
-Or let the AI agent do it: authorize the hub's SSH public key on the target
-(`ssh-copy-id user@target`) and make sure the user has passwordless sudo, then
-ask in the chat -- *"Enroll node 192.168.178.50 as user dx"*. The agent copies
-the binary from the hub (cross-architecture binaries come from the
-`--deploy-dist` directory, the output of `make all`), enrolls with the hub CA,
-installs and starts the systemd service, and verifies the node's first
-heartbeat. Every enrollment requires your explicit confirmation in chat.
+Or let the AI agent do it: generate the hub's keypair (inside the container:
+`docker exec homelabmon ssh-keygen -t ed25519 -N "" -f /data/.ssh/id_ed25519`),
+authorize the public key on the target (`ssh-copy-id user@target`), make sure
+the user has passwordless sudo, then ask in the chat -- *"Enroll node
+192.168.178.50 as user dx"*. The agent copies the binary from the hub
+(cross-architecture binaries come from the `--deploy-dist` directory, the
+output of `make all`; a non-default deploy key can be set with `--ssh-key`),
+enrolls with the hub CA, installs and starts the systemd service, and verifies
+the node's first heartbeat. Every enrollment requires your explicit
+confirmation in chat. On SSH auth failures the tool reports the hub's own
+identity files (paths, permissions, public keys) so mismatches are obvious.
 Currently Linux targets are supported.
 
 ## FreeBSD / OPNsense

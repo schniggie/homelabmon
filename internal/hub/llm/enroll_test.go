@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -156,6 +158,12 @@ func TestEnrollNodeHappyPath(t *testing.T) {
 	}
 }
 
+func mkdirAll(dir string) error { return os.MkdirAll(dir, 0700) }
+
+func writeFile(path, content string, perm os.FileMode) {
+	_ = os.WriteFile(path, []byte(content), perm)
+}
+
 // calleeArgs reconstructs the joined-args key used by fakeEnrollRunner.calls.
 func calleeArgs(call string) string {
 	// calls are "ssh|<args>|len:N|head:..."; extract everything between the
@@ -220,5 +228,104 @@ func TestEnrollNodeMissingCrossArchBinary(t *testing.T) {
 	}
 	if !strings.Contains(out, "no binary for linux/arm64") || !strings.Contains(out, "make") {
 		t.Fatalf("expected missing-binary guidance: %s", out)
+	}
+}
+
+// TestEnrollNodeAuthFailureIncludesHint verifies that an SSH auth failure
+// carries a self-diagnosing hint describing the hub's identity files.
+func TestEnrollNodeAuthFailureIncludesHint(t *testing.T) {
+	e, _, fake := newEnrollTestExecutor(t)
+	fake.failOn = "uname"
+	fake.outputs["uname"] = "cd@target: Permission denied (publickey,password)."
+
+	out, err := e.Execute(context.Background(), "enroll_node",
+		json.RawMessage(`{"address":"192.168.178.60","username":"cd","confirm":true}`))
+	if err != nil {
+		t.Fatalf("enroll_node: %v", err)
+	}
+	t.Logf("result: %s", out)
+	if !strings.Contains(out, `"hint"`) || !strings.Contains(out, "authorized_keys") {
+		t.Fatalf("expected auth hint in error, got: %s", out)
+	}
+}
+
+// TestEnrollNodeUsesConfiguredSSHKey verifies --ssh-key is passed as ssh -i
+// with IdentitiesOnly.
+func TestEnrollNodeUsesConfiguredSSHKey(t *testing.T) {
+	e, _, fake := newEnrollTestExecutor(t)
+	fake.failOn = "uname"
+	e.SetSSHKeyPath("/data/.ssh/deploy_ed25519")
+
+	e.Execute(context.Background(), "enroll_node",
+		json.RawMessage(`{"address":"192.168.178.61","username":"cd","confirm":true}`))
+
+	joined := strings.Join(fake.calls, "\n")
+	if !strings.Contains(joined, "-i /data/.ssh/deploy_ed25519") || !strings.Contains(joined, "IdentitiesOnly=yes") {
+		t.Errorf("configured key not passed to ssh: %s", joined)
+	}
+}
+
+// TestHubSSHIdentityHint covers the diagnostic builder against a real temp dir.
+func TestHubSSHIdentityHint(t *testing.T) {
+	dir := t.TempDir() + "/.ssh"
+	if err := mkdirAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	good := dir + "/id_ed25519"
+	writeFile(good, "private", 0600)
+	writeFile(good+".pub", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE1AAAAITest user@hub\n", 0644)
+	open := dir + "/id_rsa"
+	writeFile(open, "private", 0644) // too open: ssh refuses
+
+	hint := hubSSHIdentityHint("", dir)
+	if !strings.Contains(hint, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE1AAAAITest user@hub") {
+		t.Errorf("pub line missing from hint: %s", hint)
+	}
+	if !strings.Contains(hint, "TOO OPEN") {
+		t.Errorf("open-permissions key not flagged: %s", hint)
+	}
+
+	// explicit key path wins over the directory scan
+	hint = hubSSHIdentityHint(good, "")
+	if !strings.Contains(hint, "id_ed25519 (perm 0600)") || strings.Contains(hint, "id_rsa") {
+		t.Errorf("keyPath not honored: %s", hint)
+	}
+
+	// existing but keyless dir -> actionable guidance
+	empty := t.TempDir() + "/.ssh"
+	mkdirAll(empty)
+	hint = hubSSHIdentityHint("", empty)
+	if !strings.Contains(hint, "no id_* identity files") {
+		t.Errorf("empty dir not reported: %s", hint)
+	}
+}
+
+// TestEnrollNodeLiveSSHAuthFailure drives enroll_node against a real sshd
+// that does not trust this hub, verifying the auth hint end-to-end. Skipped
+// unless HOMELABMON_ENROLL_SSH_REFUSAL is set (format: user@host:port).
+func TestEnrollNodeLiveSSHAuthFailure(t *testing.T) {
+	target := os.Getenv("HOMELABMON_ENROLL_SSH_REFUSAL")
+	if target == "" {
+		t.Skip("set HOMELABMON_ENROLL_SSH_REFUSAL=user@host:port to run against a real refusing sshd")
+	}
+	e, _ := newTestExecutor(t)
+	e.SetEnrollEndpoint("9601", false)
+
+	at := strings.Index(target, "@")
+	sep := strings.LastIndex(target, ":")
+	if at == -1 || sep == -1 || sep < at {
+		t.Fatalf("invalid target format: %q (want user@host:port)", target)
+	}
+	username, address := target[:at], target[at+1:sep]
+	port, _ := strconv.Atoi(target[sep+1:])
+
+	out, err := e.Execute(context.Background(), "enroll_node",
+		json.RawMessage(fmt.Sprintf(`{"address":%q,"username":%q,"port":%d,"confirm":true}`, address, username, port)))
+	if err != nil {
+		t.Fatalf("enroll_node: %v", err)
+	}
+	t.Logf("result: %s", truncate(out, 600))
+	if !strings.Contains(out, "Permission denied") || !strings.Contains(out, `"hint"`) {
+		t.Errorf("expected Permission denied with auth hint, got: %s", truncate(out, 400))
 	}
 }

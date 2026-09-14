@@ -508,6 +508,7 @@ Root causes found by probing the live hub (proxmox1, standalone, 27 hosts):
 - [x] Enrollments are auto-recorded in node memory; systemd unit pins `User=root` + `Environment=HOME=/root` so the service resolves the same data dir as the enroll step (live-tested bug: systemd sets no HOME for root services, the service otherwise misses the certs and joins without mTLS)
 - [x] Tests: fake SSH runner drives the full orchestration (command shapes, stdin token delivery, unit content, memory record); confirmation gate, no-auto-approve, unsupported OS, missing cross-arch binary, ssh failure, deployed-but-unverified
 - [x] Live-verified end-to-end: real sshd target enrolled via chat on an mTLS hub -- binary deployed, CA enrollment over TLS, service installed, first heartbeat verified within the chat turn
+- [x] Auth-failure self-diagnostics + `--ssh-key` (field report from prod: key present on target but hub auth failed): SSH "Permission denied" failures now carry a hint describing the hub's identity files (paths, permissions, full public-key lines) so the model compares against the target's authorized_keys instead of guessing; `--ssh-key` sets an explicit deploy key (ssh -i, IdentitiesOnly); env-gated live test (HOMELABMON_ENROLL_SSH_REFUSAL=user@host:port)
 
 ---
 

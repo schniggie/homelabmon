@@ -74,6 +74,7 @@ func init() {
 	rootCmd.PersistentFlags().String("enroll-token", "", "one-time enrollment token from the CA node")
 	rootCmd.PersistentFlags().String("searxng", "", "SearXNG instance URL for agent web search (JSON format must be enabled, e.g. https://searxng.example.org)")
 	rootCmd.PersistentFlags().String("deploy-dist", "", "directory with prebuilt cross-platform binaries for enroll_node (default: <data-dir>/dist)")
+	rootCmd.PersistentFlags().String("ssh-key", "", "private key for enroll_node SSH deployments (default: ~/.ssh/id_*)")
 	rootCmd.PersistentFlags().String("site", "", "site label for multi-site federation (e.g., home, office, cloud)")
 
 	viper.BindPFlag("site", rootCmd.PersistentFlags().Lookup("site"))
@@ -98,6 +99,7 @@ func init() {
 	viper.BindPFlag("enroll-token", rootCmd.PersistentFlags().Lookup("enroll-token"))
 	viper.BindPFlag("searxng", rootCmd.PersistentFlags().Lookup("searxng"))
 	viper.BindPFlag("deploy-dist", rootCmd.PersistentFlags().Lookup("deploy-dist"))
+	viper.BindPFlag("ssh-key", rootCmd.PersistentFlags().Lookup("ssh-key"))
 }
 
 func runAgent(cmd *cobra.Command, args []string) error {
@@ -301,6 +303,9 @@ func runAgent(cmd *cobra.Command, args []string) error {
 		distDir = filepath.Join(dir, "dist")
 	}
 	executor.SetDeployDistDir(distDir)
+	if keyPath := viper.GetString("ssh-key"); keyPath != "" {
+		executor.SetSSHKeyPath(keyPath)
+	}
 
 	// 7b. Enrollment (if --enroll-url and --enroll-token are set)
 	enrollURL := viper.GetString("enroll-url")

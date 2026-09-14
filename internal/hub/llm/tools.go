@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -73,6 +74,7 @@ type ToolExecutor struct {
 	enrollPort    string // port targets use to reach this hub for enrollment
 	enrollTLS     bool   // whether this hub serves enrollment over TLS (CA installed)
 	deployDistDir string // prebuilt cross-platform binaries (make all output)
+	sshKeyPath    string // private key for enroll_node SSH deployments (default: ~/.ssh/id_*)
 }
 
 func NewToolExecutor(s *store.Store, identity *models.NodeIdentity) *ToolExecutor {
@@ -104,6 +106,10 @@ func (e *ToolExecutor) SetEnrollEndpoint(port string, tls bool) {
 // SetDeployDistDir points enroll_node at prebuilt cross-platform binaries
 // (the output of `make all`: homelabmon-<os>-<arch>).
 func (e *ToolExecutor) SetDeployDistDir(dir string) { e.deployDistDir = dir }
+
+// SetSSHKeyPath sets an explicit private key for enroll_node SSH deployments
+// (passed as ssh -i). Empty = ssh's default identities (~/.ssh/id_*).
+func (e *ToolExecutor) SetSSHKeyPath(path string) { e.sshKeyPath = path }
 
 const confirmHint = `"hint":"this action is destructive; ask the user to confirm, then call again with confirm=true"`
 
@@ -1516,8 +1522,11 @@ func (e *ToolExecutor) enrollNode(ctx context.Context, args json.RawMessage) (st
 		"-o", "StrictHostKeyChecking=accept-new",
 		"-o", "ConnectTimeout=5",
 		"-p", strconv.Itoa(sshPort),
-		params.Username + "@" + params.Address,
 	}
+	if e.sshKeyPath != "" {
+		sshBase = append(sshBase, "-i", e.sshKeyPath, "-o", "IdentitiesOnly=yes")
+	}
+	sshBase = append(sshBase, params.Username+"@"+params.Address)
 	run := func(stdin, remote string) (string, error) {
 		return runner.Run(ctx, stdin, "ssh", append(append([]string{}, sshBase...), remote)...)
 	}
@@ -1526,7 +1535,17 @@ func (e *ToolExecutor) enrollNode(ctx context.Context, args json.RawMessage) (st
 		if msg == "" {
 			msg = err.Error()
 		}
-		return fmt.Sprintf(`{"error":"enroll_node failed at %q: %s"}`, step, truncate(msg, 400))
+		errText := fmt.Sprintf("enroll_node failed at %q: %s", step, truncate(msg, 400))
+		// SSH auth failures are the common misconfiguration; make them
+		// self-diagnosing by describing the hub's own identity files.
+		if strings.Contains(strings.ToLower(msg), "permission denied") {
+			b, _ := json.Marshal(map[string]string{
+				"error": errText,
+				"hint":  hubSSHIdentityHint(e.sshKeyPath, ""),
+			})
+			return string(b)
+		}
+		return fmt.Sprintf(`{"error":%q}`, errText)
 	}
 
 	// 1. Detect target platform
@@ -1708,6 +1727,89 @@ WantedBy=multi-user.target
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'`) + "'"
+}
+
+// hubSSHIdentityHint describes the hub's SSH identity files so auth failures
+// are self-diagnosing: which keys exist, whether ssh would even accept them
+// (permissions), and their public halves for comparison against the target's
+// authorized_keys. keyPath wins when explicitly configured; otherwise the
+// sshDir is scanned for id_* private keys.
+func hubSSHIdentityHint(keyPath, sshDir string) string {
+	hint := hubSSHIdentityHintInner(keyPath, sshDir)
+	// Container gotcha worth calling out: ssh expands ~/.ssh from the passwd
+	// entry (uid -> /root in the hub image), NOT from $HOME - so keys placed
+	// under $HOME/.ssh (=/data/.ssh) are silently never tried.
+	if pwHome := passwdHome(); pwHome != "" {
+		if envHome, err := os.UserHomeDir(); err == nil && envHome != pwHome {
+			hint += fmt.Sprintf(" (note: ssh ignores $HOME=%s for identities and looks in the passwd home %s - place keys there or set --ssh-key)", envHome, pwHome)
+		}
+	}
+	return hint
+}
+
+// passwdHome returns the home directory of the current user from the passwd
+// database - what ssh actually uses for ~/.ssh expansion.
+func passwdHome() string {
+	if cur, err := user.Current(); err == nil && cur.HomeDir != "" {
+		return cur.HomeDir
+	}
+	return ""
+}
+
+func hubSSHIdentityHintInner(keyPath, sshDir string) string {
+	var ids []string
+	if keyPath != "" {
+		ids = []string{keyPath}
+	} else {
+		if sshDir == "" {
+			if pwHome := passwdHome(); pwHome != "" {
+				sshDir = filepath.Join(pwHome, ".ssh")
+			} else if home, err := os.UserHomeDir(); err == nil {
+				sshDir = filepath.Join(home, ".ssh")
+			} else {
+				return "hub has no resolvable home - set --ssh-key to the deploy key path"
+			}
+		}
+		entries, err := os.ReadDir(sshDir)
+		if err != nil {
+			return fmt.Sprintf("hub has no %s directory: no SSH identity available for enroll_node (place the deploy private key there or set --ssh-key)", sshDir)
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasPrefix(name, "id_") || strings.HasSuffix(name, ".pub") {
+				continue
+			}
+			ids = append(ids, filepath.Join(sshDir, name))
+		}
+	}
+	if len(ids) == 0 {
+		return fmt.Sprintf("hub has no id_* identity files in %s: place the deploy private key there or set --ssh-key", sshDir)
+	}
+	var parts []string
+	for _, id := range ids {
+		fi, err := os.Stat(id)
+		if err != nil {
+			parts = append(parts, id+": MISSING")
+			continue
+		}
+		perm := fi.Mode().Perm()
+		entry := fmt.Sprintf("%s (perm %04o)", id, perm)
+		if perm != 0600 {
+			entry += " TOO OPEN - ssh refuses it, chmod 600 required"
+		}
+		if b, err := os.ReadFile(id + ".pub"); err == nil {
+			line := strings.TrimSpace(string(b))
+			if i := strings.IndexByte(line, '\n'); i >= 0 {
+				line = line[:i]
+			}
+			entry += " | pub: " + line
+		} else {
+			entry += " | no .pub file next to it"
+		}
+		parts = append(parts, entry)
+	}
+	return "hub SSH identities: " + strings.Join(parts, " ; ") +
+		" - the pub line must appear verbatim in the target user's ~/.ssh/authorized_keys; also check the private key has no passphrase"
 }
 
 // runCommand executes a shell command on a mesh node. Every command requires
