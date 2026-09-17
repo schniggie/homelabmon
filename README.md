@@ -262,7 +262,9 @@ enrolls with the hub CA, installs and starts the systemd service, and verifies
 the node's first heartbeat. Every enrollment requires your explicit
 confirmation in chat. On SSH auth failures the tool reports the hub's own
 identity files (paths, permissions, public keys) so mismatches are obvious.
-Currently Linux targets are supported.
+Linux (systemd) and FreeBSD/OPNsense (rc.d) targets are supported; on
+OPNsense, major upgrades wipe `/usr/local` additions, so re-run the
+enrollment after them.
 
 ## FreeBSD / OPNsense
 

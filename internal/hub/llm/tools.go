@@ -293,7 +293,7 @@ func ToolDefinitions() []Tool {
 			Type: "function",
 			Function: ToolFunction{
 				Name:        "enroll_node",
-				Description: "Deploy the homelabmon agent to a new Linux machine over SSH and join it to the mesh: copies the binary from this hub, runs one-time CA enrollment, installs and starts a systemd service, and verifies the node's first heartbeat arrived. Requires that this hub's SSH public key is already authorized on the target for the given user, and that the user has passwordless sudo (or is root). Use when the user asks to add or enroll a new node. State the target address and SSH user, then get explicit user approval for EVERY node before calling with confirm=true.",
+				Description: "Deploy the homelabmon agent to a new Linux (systemd) or FreeBSD/OPNsense (rc.d) machine over SSH and join it to the mesh: copies the binary from this hub, runs one-time CA enrollment, installs and starts the service, and verifies the node's first heartbeat arrived. Requires that this hub's SSH public key is already authorized on the target for the given user, and that the user is root or has passwordless sudo. Use when the user asks to add or enroll a new node. State the target address and SSH user, then get explicit user approval for EVERY node before calling with confirm=true.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{"address":{"type":"string","description":"Target IP or hostname (e.g. 192.168.178.50)"},"username":{"type":"string","description":"SSH user on the target (root or a user with passwordless sudo)"},"port":{"type":"integer","description":"SSH port (default 22)"},"site":{"type":"string","description":"Optional site label for multi-site federation"},"extra_args":{"type":"string","description":"Extra flags for the target's service (space separated), e.g. --scan or --exec"},"confirm":{"type":"boolean","description":"Must be true, and only after the user explicitly approved enrolling this exact node"}},"required":["address","username","confirm"]}`),
 			},
 		},
@@ -1560,14 +1560,20 @@ func (e *ToolExecutor) enrollNode(ctx context.Context, args json.RawMessage) (st
 	if perr != "" {
 		return `{"error":"` + perr + `"}`, nil
 	}
-	if goos != "linux" {
-		return fmt.Sprintf(`{"error":"target runs %s; only Linux targets are supported currently"}`, goos), nil
+	if goos != "linux" && goos != "freebsd" {
+		return fmt.Sprintf(`{"error":"target runs %s; only Linux and FreeBSD targets are supported currently"}`, goos), nil
 	}
 
 	// 2. Resolve the binary for the target platform
 	binPath, berr := e.resolveDeployBinary(goos, arch)
 	if berr != nil {
 		return fmt.Sprintf(`{"error":"%s"}`, berr.Error()), nil
+	}
+
+	// root needs no sudo - and stock OPNsense does not even ship it
+	sudo := "sudo "
+	if params.Username == "root" {
+		sudo = ""
 	}
 
 	// 3. Upload and install the binary
@@ -1579,9 +1585,9 @@ func (e *ToolExecutor) enrollNode(ctx context.Context, args json.RawMessage) (st
 	if err != nil {
 		return fail("binary upload", out, err), nil
 	}
-	out, err = run("", "sudo install -m 755 /tmp/homelabmon.deploy /usr/local/bin/homelabmon && rm -f /tmp/homelabmon.deploy")
+	out, err = run("", fmt.Sprintf("%sinstall -m 755 /tmp/homelabmon.deploy /usr/local/bin/homelabmon && rm -f /tmp/homelabmon.deploy", sudo))
 	if err != nil {
-		return fail("binary install (needs passwordless sudo)", out, err), nil
+		return fail("binary install (root user or passwordless sudo required)", out, err), nil
 	}
 
 	// 4. One-time enrollment; fresh token stored on the hub, passed via stdin
@@ -1593,16 +1599,24 @@ func (e *ToolExecutor) enrollNode(ctx context.Context, args json.RawMessage) (st
 	if uerr != nil {
 		return fmt.Sprintf(`{"error":"determine hub address: %s"}`, uerr.Error()), nil
 	}
-	out, err = run(token, fmt.Sprintf("sudo /usr/local/bin/homelabmon enroll --enroll-url %s --enroll-token -", shellQuote(enrollURL)))
+	out, err = run(token, fmt.Sprintf("%s/usr/local/bin/homelabmon enroll --enroll-url %s --enroll-token -", sudo, shellQuote(enrollURL)))
 	if err != nil {
 		return fail("CA enrollment", out, err), nil
 	}
 
-	// 5. Install and start the systemd service (no enrollment flags: certs persist)
-	out, err = run(enrollSystemdUnit(params.Site, params.ExtraArgs),
-		"sudo tee /etc/systemd/system/homelabmon.service > /dev/null && sudo systemctl daemon-reload && sudo systemctl enable --now homelabmon")
+	// 5. Install and start the service (per-OS; no enrollment flags: certs persist)
+	serviceDesc := "systemd service"
+	switch goos {
+	case "freebsd":
+		serviceDesc = "rc.d service (/usr/local/etc/rc.d/homelabmon)"
+		out, err = run(enrollRcScript(params.Site, params.ExtraArgs),
+			fmt.Sprintf("%stee /usr/local/etc/rc.d/homelabmon > /dev/null && %schmod 755 /usr/local/etc/rc.d/homelabmon && %ssysrc homelabmon_enable=YES && %sservice homelabmon start", sudo, sudo, sudo, sudo))
+	default: // linux and other systemd platforms
+		out, err = run(enrollSystemdUnit(params.Site, params.ExtraArgs),
+			fmt.Sprintf("%stee /etc/systemd/system/homelabmon.service > /dev/null && %ssystemctl daemon-reload && %ssystemctl enable --now homelabmon", sudo, sudo, sudo))
+	}
 	if err != nil {
-		return fail("systemd service install", out, err), nil
+		return fail(serviceDesc+" install", out, err), nil
 	}
 
 	// 6. Verify the first heartbeat arrived at this hub
@@ -1617,7 +1631,7 @@ func (e *ToolExecutor) enrollNode(ctx context.Context, args json.RawMessage) (st
 						"enrolled": params.Address,
 						"hostname": h.Hostname,
 						"os":       goos + "/" + arch,
-						"service":  "homelabmon (systemd)",
+						"service":  "homelabmon (" + serviceDesc + ")",
 						"verified": true,
 						"note":     "first heartbeat received; node is part of the mesh",
 					})), nil
@@ -1629,9 +1643,9 @@ func (e *ToolExecutor) enrollNode(ctx context.Context, args json.RawMessage) (st
 				"ok":       true,
 				"enrolled": params.Address,
 				"os":       goos + "/" + arch,
-				"service":  "homelabmon (systemd)",
+				"service":  "homelabmon (" + serviceDesc + ")",
 				"verified": false,
-				"note":     "deployed and service started, but no heartbeat reached this hub within 90s - check 'systemctl status homelabmon' on the target",
+				"note":     "deployed and service started, but no heartbeat reached this hub within 90s - check the service on the target (systemctl status homelabmon / service homelabmon status)",
 			})), nil
 		}
 		select {
@@ -1731,6 +1745,37 @@ NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
+`
+}
+
+// enrollRcScript renders the target's FreeBSD rc.d script. Runs the agent
+// via daemon(8) with restart-on-exit and syslog logging; HOME is pinned
+// because rc scripts (like systemd units) start without it.
+func enrollRcScript(site, extraArgs string) string {
+	execArgs := "--ui --scan"
+	if s := strings.TrimSpace(site); s != "" {
+		execArgs += " --site " + shellQuote(s)
+	}
+	if extra := strings.TrimSpace(extraArgs); extra != "" {
+		execArgs += " " + extra
+	}
+	return `#!/bin/sh
+# PROVIDE: homelabmon
+# REQUIRE: DAEMON
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+name=homelabmon
+rcvar=homelabmon_enable
+command=/usr/sbin/daemon
+procname=/usr/local/bin/homelabmon
+pidfile=/var/run/homelabmon.pid
+command_args="-c -S -p ${pidfile} ${procname} ` + execArgs + `"
+load_rc_config ${name}
+# rc scripts start without HOME; pin the data dir so it matches the certs
+# written during bootstrap
+export HOME=${homelabmon_home:-/root}
+run_rc_command "$1"
 `
 }
 

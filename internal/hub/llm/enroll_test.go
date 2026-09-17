@@ -212,7 +212,7 @@ func TestEnrollNodeUnsupportedOS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enroll_node: %v", err)
 	}
-	if !strings.Contains(out, "only Linux targets") {
+	if !strings.Contains(out, "only Linux and FreeBSD targets") {
 		t.Fatalf("expected unsupported-OS error: %s", out)
 	}
 }
@@ -352,5 +352,87 @@ func TestParseUnameIgnoresSSHWarnings(t *testing.T) {
 	// SunOS is a known OS keyword, so the arch parses; enrollNode rejects non-linux
 	if errMsg != "" {
 		t.Errorf("SunOS+x86_64 should parse: %q", errMsg)
+	}
+}
+
+// TestEnrollNodeFreeBSDRcService verifies the OPNsense/FreeBSD path: rc.d
+// script instead of systemd, and no sudo for the root user.
+func TestEnrollNodeFreeBSDRcService(t *testing.T) {
+	e, _, fake := newEnrollTestExecutor(t)
+	fake.outputs["uname"] = "FreeBSD\namd64\n"
+	dist := t.TempDir()
+	writeFile(dist+"/homelabmon-freebsd-amd64", "binary", 0755)
+	e.SetDeployDistDir(dist)
+	e.SetSSHKeyPath("")
+	enrollPollInterval = time.Millisecond
+	enrollPollMax = 20 * time.Millisecond
+
+	out, err := e.Execute(context.Background(), "enroll_node",
+		json.RawMessage(`{"address":"192.168.178.2","username":"root","extra_args":"--exec","confirm":true}`))
+	if err != nil {
+		t.Fatalf("enroll_node: %v", err)
+	}
+	if !strings.Contains(out, `"verified":false`) {
+		t.Fatalf("expected deployed-but-unverified result, got: %s", truncate(out, 400))
+	}
+
+	joined := strings.Join(fake.calls, "\n")
+	if strings.Contains(joined, "sudo ") {
+		t.Errorf("root user must not get sudo prefixes: %s", joined)
+	}
+	for _, want := range []string{
+		"/usr/local/etc/rc.d/homelabmon",
+		"sysrc homelabmon_enable=YES",
+		"service homelabmon start",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("freebsd flow missing %q", want)
+		}
+	}
+	// rc script content
+	var unit string
+	for _, c := range fake.calls {
+		if strings.Contains(c, "rc.d/homelabmon") {
+			unit = fake.stdins[calleeArgs(c)]
+		}
+	}
+	for _, want := range []string{"# PROVIDE: homelabmon", "/usr/sbin/daemon", "export HOME=${homelabmon_home:-/root}", "--ui --scan --exec"} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("rc script missing %q: %s", want, unit)
+		}
+	}
+	if strings.Contains(unit, "--enroll") {
+		t.Errorf("rc script must not contain enrollment flags: %s", unit)
+	}
+}
+
+// TestEnrollNodeLinuxRootSkipsSudo verifies root targets run without sudo
+// (minimal Linux systems and OPNsense do not ship it).
+func TestEnrollNodeLinuxRootSkipsSudo(t *testing.T) {
+	e, _, fake := newEnrollTestExecutor(t)
+	enrollPollInterval = time.Millisecond
+	enrollPollMax = 20 * time.Millisecond
+
+	e.Execute(context.Background(), "enroll_node",
+		json.RawMessage(`{"address":"192.168.178.70","username":"root","confirm":true}`))
+
+	joined := strings.Join(fake.calls, "\n")
+	if strings.Contains(joined, "sudo ") {
+		t.Errorf("root user must not get sudo prefixes: %s", joined)
+	}
+	if !strings.Contains(joined, "systemctl enable --now homelabmon") {
+		t.Errorf("linux systemd flow not executed: %s", joined)
+	}
+}
+
+// TestEnrollRcScript checks the rc.d rendering helpers.
+func TestEnrollRcScript(t *testing.T) {
+	s := enrollRcScript("home", "--exec")
+	if !strings.Contains(s, `--site 'home' --exec`) {
+		t.Errorf("site/extra args not rendered: %s", s)
+	}
+	s = enrollRcScript("", "")
+	if !strings.Contains(s, "--ui --scan") || strings.Contains(s, "--site") {
+		t.Errorf("default args wrong: %s", s)
 	}
 }
