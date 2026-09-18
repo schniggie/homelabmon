@@ -220,14 +220,15 @@ func TestEnrollNodeUnsupportedOS(t *testing.T) {
 func TestEnrollNodeMissingCrossArchBinary(t *testing.T) {
 	e, _, fake := newEnrollTestExecutor(t)
 	fake.outputs["uname"] = "Linux\naarch64\n"
-	e.SetDeployDistDir(t.TempDir()) // empty dist dir
+	dist := t.TempDir() // empty dist dir
+	e.SetDeployDistDir(dist)
 	out, err := e.Execute(context.Background(), "enroll_node",
 		json.RawMessage(`{"address":"192.168.178.53","username":"dx","confirm":true}`))
 	if err != nil {
 		t.Fatalf("enroll_node: %v", err)
 	}
-	if !strings.Contains(out, "no binary for linux/arm64") || !strings.Contains(out, "make") {
-		t.Fatalf("expected missing-binary guidance: %s", out)
+	if !strings.Contains(out, "no binary for linux/arm64") || !strings.Contains(out, "make") || !strings.Contains(out, dist) {
+		t.Fatalf("expected missing-binary guidance naming the dist dir: %s", out)
 	}
 }
 

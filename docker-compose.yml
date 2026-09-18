@@ -29,8 +29,9 @@ services:
       # - HOMELABMON_RETENTION_DAYS=30
     volumes:
       - ./data:/data
-      # prebuilt cross-platform binaries for enroll_node (`make all` output)
-      - ./dist:/data/dist:ro
+      # prebuilt cross-platform binaries for enroll_node (`make all` output);
+      # the hub scans <data-dir>/dist = /data/.homelabmon/dist
+      - ./dist:/data/.homelabmon/dist:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /:/hostfs:ro
     # Add --no-auth to disable web UI authentication

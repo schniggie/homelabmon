@@ -1697,8 +1697,8 @@ func (e *ToolExecutor) resolveDeployBinary(goos, arch string) (string, error) {
 			return p, nil
 		}
 	}
-	return "", fmt.Errorf("no binary for %s/%s available on this hub (itself: %s/%s); build it with 'make' and copy dist/homelabmon-%s-%s into the dist directory",
-		goos, arch, runtime.GOOS, runtime.GOARCH, goos, arch)
+	return "", fmt.Errorf("no binary for %s/%s in %s (hub itself: %s/%s); build it with 'make' and copy dist/homelabmon-%s-%s there, or set --deploy-dist",
+		goos, arch, e.deployDistDir, runtime.GOOS, runtime.GOARCH, goos, arch)
 }
 
 // enrollURLFor derives the enroll URL targets should use: the hub's source
